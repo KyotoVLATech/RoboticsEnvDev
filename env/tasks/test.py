@@ -1,10 +1,11 @@
+# python3 -m env.tasks.test
 import random
+from typing import Any
 
+import genesis as gs
 import numpy as np
 import torch
 from gymnasium import spaces
-
-import Genesis.genesis as gs
 
 joints_name = (
     "joint1",
@@ -21,7 +22,12 @@ AGENT_DIM = len(joints_name)
 
 
 class TestTask:
-    def __init__(self, observation_height, observation_width, show_viewer=False):
+    def __init__(
+        self,
+        observation_height: float,
+        observation_width: float,
+        show_viewer: bool = False,
+    ):
         self.observation_height = observation_height
         self.observation_width = observation_width
         self._random = np.random.RandomState()
@@ -31,7 +37,7 @@ class TestTask:
             low=-1.0, high=1.0, shape=(AGENT_DIM,), dtype=np.float32
         )
 
-    def _build_scene(self, show_viewer):
+    def _build_scene(self, show_viewer: bool) -> None:
         if not gs._initialized:
             gs.init(backend=gs.gpu, precision="32")
         # シーンを初期化
@@ -95,7 +101,7 @@ class TestTask:
         self.fingers_dof = np.arange(7, 9)
         self.eef = self.franka.get_link("hand")
 
-    def _make_obs_space(self):
+    def _make_obs_space(self) -> spaces.Dict:
         return spaces.Dict(
             {
                 "agent_pos": spaces.Box(
@@ -122,7 +128,13 @@ class TestTask:
             }
         )
 
-    def set_random_state(self, target, x_range, y_range, z):
+    def set_random_state(
+        self,
+        target: Any,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        z: float,
+    ) -> None:
         x = np.random.uniform(x_range[0], x_range[1])
         y = np.random.uniform(y_range[0], y_range[1])
         z = z
@@ -131,7 +143,7 @@ class TestTask:
         target.set_pos(pos_tensor)
         target.set_quat(quat_tensor)
 
-    def reset(self):
+    def reset(self) -> tuple[dict, dict]:
         # 箱を初期位置に設定
         pos_tensor = torch.tensor(
             [0.5, 0.0, 0.0], dtype=torch.float32, device=gs.device
@@ -172,7 +184,7 @@ class TestTask:
         self.sound_cam.start_recording()
         return self.get_obs(), {}
 
-    def seed(self, seed):
+    def seed(self, seed: int) -> None:
         np.random.seed(seed)
         random.seed(seed)
         self._random = np.random.RandomState(seed)
@@ -180,7 +192,7 @@ class TestTask:
         torch.cuda.manual_seed_all(seed)
         self.action_space.seed(seed)
 
-    def step(self, action):
+    def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         action_tensor = torch.tensor(action, dtype=torch.float32, device=gs.device)
         self.franka.control_dofs_position(action_tensor[:7], self.motors_dof)
         self.franka.control_dofs_position(action_tensor[7:], self.fingers_dof)
@@ -189,10 +201,10 @@ class TestTask:
         obs = self.get_obs()
         terminated = False
         truncated = False
-        info = {}
+        info: dict = {}
         return obs, reward, terminated, truncated, info
 
-    def compute_reward(self):
+    def compute_reward(self) -> float:
         # CubeAがboxの中にあるかどうかをチェック
         cubeA_pos = self.cubeA.get_pos().cpu().numpy()
         box_pos = self.box.get_pos().cpu().numpy()
@@ -213,7 +225,7 @@ class TestTask:
         reward = 1.0 if cubeA_in_box else 0.0
         return reward
 
-    def get_obs(self):
+    def get_obs(self) -> dict:
         # ロボットの状態を取得
         eef_pos = self.eef.get_pos().cpu().numpy()
         eef_rot = self.eef.get_quat().cpu().numpy()
@@ -242,7 +254,7 @@ class TestTask:
         }
         return obs
 
-    def save_videos(self, file_name, fps=30):
+    def save_videos(self, file_name: str, fps: int = 30) -> None:
         self.front_cam.stop_recording(
             save_to_filename=f"{file_name}_front.mp4", fps=fps
         )
@@ -253,19 +265,24 @@ class TestTask:
 
 
 class DummyCamera:
-    def __init__(self, target, observation_height, observation_width):
-        self.observation_height = observation_height
-        self.observation_width = observation_width
+    def __init__(
+        self,
+        target: Any,
+        observation_height: float,
+        observation_width: float,
+    ) -> None:
+        self.observation_height = int(observation_height)
+        self.observation_width = int(observation_width)
 
-    def start_recording(self):
+    def start_recording(self) -> None:
         pass
 
-    def stop_recording(self, save_to_filename, fps):
+    def stop_recording(self, save_to_filename: str, fps: int) -> None:
         pass
 
-    def render(self):
+    def render(self) -> tuple[np.ndarray, None]:
         # ダミーの画像を生成
-        dummy_image = np.zeros(
+        dummy_image: np.ndarray = np.zeros(
             (self.observation_height, self.observation_width, 3), dtype=np.uint8
         )
         return dummy_image, None
@@ -281,12 +298,12 @@ if __name__ == "__main__":
         action = np.random.uniform(-1.0, 1.0, size=(AGENT_DIM,))
         task.step(action)
     # 最後の画像を保存
-    # obs = task.get_obs()
-    # for key, value in obs.items():
-    #     if key == "agent_pos" or key == "sound":
-    #         continue
-    #     # rgbの入れ替え
-    #     if value.shape[2] == 3:
-    #         value = cv2.cvtColor(value, cv2.COLOR_RGB2BGR)
-    #     print(f"{key}: {value.shape}")
-    #     cv2.imwrite(f"{key}.png", value)
+    obs = task.get_obs()
+    for key, value in obs.items():
+        if key == "agent_pos" or key == "sound":
+            continue
+        # rgbの入れ替え
+        if value.shape[2] == 3:
+            value = cv2.cvtColor(value, cv2.COLOR_RGB2BGR)
+        print(f"{key}: {value.shape}")
+        cv2.imwrite(f"{key}.png", value)

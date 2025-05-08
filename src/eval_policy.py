@@ -1,26 +1,28 @@
+# python3 -m src.eval_policy
+
 from pathlib import Path
 
+import genesis as gs
 import imageio
 import numpy as np
 import torch
 
-import Genesis.genesis as gs
 from env.genesis_env import GenesisEnv
-from lerobot.lerobot.common.policies.act.modeling_act import ACTPolicy
-from lerobot.lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
-from lerobot.lerobot.common.policies.tdmpc.modeling_tdmpc import TDMPCPolicy
-from lerobot.lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
+from lerobot.common.policies.act.modeling_act import ACTPolicy
+from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
+from lerobot.common.policies.tdmpc.modeling_tdmpc import TDMPCPolicy
+from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
 
 def main(
-    training_name,
-    observation_height,
-    observation_width,
-    episode_num,
-    show_viewer,
-    checkpoint_step="last",
-):
+    training_name: str,
+    observation_height: int,
+    observation_width: int,
+    episode_num: int,
+    show_viewer: bool,
+    checkpoint_step: str = "last",
+) -> None:
     policy_list = ["act", "diffusion", "pi0", "tdmpc", "vqbet"]
     task_list = ["test", "sound"]
     output_directory = Path(f"outputs/eval/{training_name}_{checkpoint_step}")
@@ -211,10 +213,10 @@ def main(
 
 
 if __name__ == "__main__":
-    training_name = "act-test_0"
+    training_name = "diffusion-test_0"
     observation_height = 480
     observation_width = 640
-    episode_num = 20
+    episode_num = 2
     show_viewer = False
     checkpoint_step = "last"
     main(
