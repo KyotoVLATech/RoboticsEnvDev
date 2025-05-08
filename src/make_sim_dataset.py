@@ -1,14 +1,13 @@
-import genesis as gs
-import numpy as np
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from env.genesis_env import GenesisEnv
-from env.tasks.sound import joints_name
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-import os
+
 import numpy as np
 from PIL import Image
+
+import Genesis.genesis as gs
+from env.genesis_env import GenesisEnv
+from env.tasks.sound import joints_name
+from lerobot.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
 
 def expert_policy(env, stage):
     task = env._env
@@ -17,7 +16,7 @@ def expert_policy(env, stage):
     # motors_dof = task.motors_dof
     # fingers_dof = task.fingers_dof
     finder_pos = -0.02  # tighter grip
-    quat = np.array([0, 1, 0, 0]) # Changed from [[0, 1, 0, 0]] to [0, 1, 0, 0]
+    quat = np.array([0, 1, 0, 0])  # Changed from [[0, 1, 0, 0]] to [0, 1, 0, 0]
     eef = task.eef
 
     # === Stage definitions ===
@@ -45,14 +44,19 @@ def expert_policy(env, stage):
     else:
         raise ValueError(f"Unknown stage: {stage}")
     # Use IK to compute joint positions for the arm
-    qpos = task.franka.inverse_kinematics(
-        link=eef,
-        pos=target_pos,
-        quat=quat,
-    ).cpu().numpy()
+    qpos = (
+        task.franka.inverse_kinematics(
+            link=eef,
+            pos=target_pos,
+            quat=quat,
+        )
+        .cpu()
+        .numpy()
+    )
     qpos_arm = qpos[:-2]
-    action = np.concatenate([qpos_arm, grip]) # Shape (9)
+    action = np.concatenate([qpos_arm, grip])  # Shape (9)
     return action.astype(np.float32)
+
 
 def initialize_dataset(task, height, width):
     # Initialize dataset
@@ -68,21 +72,47 @@ def initialize_dataset(task, height, width):
         robot_type="franka",
         use_videos=True,
         features={
-            "observation.state": {"dtype": "float32", "shape": (9,), "names": joints_name},
+            "observation.state": {
+                "dtype": "float32",
+                "shape": (9,),
+                "names": joints_name,
+            },
             "action": {"dtype": "float32", "shape": (9,), "names": joints_name},
-            "observation.images.front": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-            "observation.images.side": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-            "observation.images.sound": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
+            "observation.images.front": {
+                "dtype": "video",
+                "shape": (height, width, 3),
+                "names": ("height", "width", "channels"),
+            },
+            "observation.images.side": {
+                "dtype": "video",
+                "shape": (height, width, 3),
+                "names": ("height", "width", "channels"),
+            },
+            "observation.images.sound": {
+                "dtype": "video",
+                "shape": (height, width, 3),
+                "names": ("height", "width", "channels"),
+            },
         },
     )
     return lerobot_dataset
 
-def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
-    gs.init(backend=gs.gpu, precision="32") # cpuの方が早い？
+
+def main(
+    task,
+    stage_dict,
+    observation_height=480,
+    observation_width=640,
+    episode_num=1,
+    show_viewer=False,
+):
+    gs.init(backend=gs.gpu, precision="32")  # cpuの方が早い？
     env = None
     dataset = initialize_dataset(task, observation_height, observation_width)
     if task == "sound":
-        dummy_dataset = initialize_dataset("dummy", observation_height, observation_width)
+        dummy_dataset = initialize_dataset(
+            "dummy", observation_height, observation_width
+        )
     ep = 0
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
@@ -90,7 +120,12 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             # メモリリークを避けるために、10エピソードごとに環境をリセット
             if env is not None:
                 env.close()
-            env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
+            env = GenesisEnv(
+                task=task,
+                observation_height=observation_height,
+                observation_width=observation_width,
+                show_viewer=show_viewer,
+            )
         env.reset()
         states, images_front, images_side, images_sound, actions = [], [], [], [], []
         reward_greater_than_zero = False
@@ -126,38 +161,50 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             if isinstance(image_sound, Image.Image):
                 image_sound = np.array(image_sound)
 
-            dataset.add_frame({
-                "observation.state": states[i].astype(np.float32),
-                "action": actions[i].astype(np.float32),
-                "observation.images.front": image_front,
-                "observation.images.side": image_side,
-                "observation.images.sound": image_sound,
-                "task": "pick cube with sound",
-            })
-            if task == "sound":
-                dummy_dataset.add_frame({
+            dataset.add_frame(
+                {
                     "observation.state": states[i].astype(np.float32),
                     "action": actions[i].astype(np.float32),
                     "observation.images.front": image_front,
                     "observation.images.side": image_side,
-                    "observation.images.sound": np.zeros_like(image_sound),
-                    "task": "pick cube without sound",
-                })
+                    "observation.images.sound": image_sound,
+                    "task": "pick cube with sound",
+                }
+            )
+            if task == "sound":
+                dummy_dataset.add_frame(
+                    {
+                        "observation.state": states[i].astype(np.float32),
+                        "action": actions[i].astype(np.float32),
+                        "observation.images.front": image_front,
+                        "observation.images.side": image_side,
+                        "observation.images.sound": np.zeros_like(image_sound),
+                        "task": "pick cube without sound",
+                    }
+                )
         dataset.save_episode()
         if task == "sound":
             dummy_dataset.save_episode()
     env.close()
 
+
 if __name__ == "__main__":
-    task = "test" # "test" or "sound"
+    task = "test"  # "test" or "sound"
     # 20秒くらいのタスクを想定 → 合計600フレーム
     stage_dict = {
-        "hover": 100, # cubeの上に手を持っていく
-        "stabilize": 60, # cubeの上で手を安定させる
-        "grasp": 20, # cubeを掴む
-        "lift": 60, # cubeを持ち上げる
-        "to_box": 100, # cubeを箱の上に持っていく
-        "stabilize_box": 60, # cubeを箱の上で安定させる
-        "release": 60, # cubeを離す
+        "hover": 100,  # cubeの上に手を持っていく
+        "stabilize": 60,  # cubeの上で手を安定させる
+        "grasp": 20,  # cubeを掴む
+        "lift": 60,  # cubeを持ち上げる
+        "to_box": 100,  # cubeを箱の上に持っていく
+        "stabilize_box": 60,  # cubeを箱の上で安定させる
+        "release": 60,  # cubeを離す
     }
-    main(task=task, stage_dict=stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False)
+    main(
+        task=task,
+        stage_dict=stage_dict,
+        observation_height=480,
+        observation_width=640,
+        episode_num=1,
+        show_viewer=False,
+    )
