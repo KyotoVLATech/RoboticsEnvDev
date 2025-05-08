@@ -1,0 +1,13 @@
+# settings
+.vscode/
+
+# data
+datasets/
+URDF/
+
+# cache
+__pycache__/
+.mypy_cache/
+
+# env
+.venv/

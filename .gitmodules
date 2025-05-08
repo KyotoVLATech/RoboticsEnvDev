@@ -1,0 +1,6 @@
+[submodule "lerobot"]
+	path = lerobot
+	url = git@github.com:KyotoVLATech/lerobot-KVT.git
+[submodule "Genesis"]
+	path = Genesis
+	url = git@github.com:KyotoVLATech/Genesis-KVT.git
