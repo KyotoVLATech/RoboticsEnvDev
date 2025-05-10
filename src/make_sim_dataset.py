@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from env.genesis_env import GenesisEnv
-from env.tasks.sound import joints_name
+from env.tasks.test import joints_name
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 
