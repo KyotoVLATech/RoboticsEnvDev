@@ -1,4 +1,4 @@
-# python3 -m src.make_sim_dataset
+# uv run -m src.make_sim_dataset
 
 import os
 from typing import Any
@@ -10,7 +10,6 @@ from PIL import Image
 from env.genesis_env import GenesisEnv
 from env.tasks.test import joints_name
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-
 
 def expert_policy(env: GenesisEnv, stage: str) -> np.ndarray:
     task: Any = env._env  # Assuming env._env can be of various types, use Any
@@ -95,11 +94,6 @@ def initialize_dataset(task: str, height: int, width: int) -> LeRobotDataset:
                 "shape": (height, width, 3),
                 "names": ("height", "width", "channels"),
             },
-            "observation.images.sound": {
-                "dtype": "video",
-                "shape": (height, width, 3),
-                "names": ("height", "width", "channels"),
-            },
         },
     )
     return lerobot_dataset
@@ -112,17 +106,16 @@ def main(
     observation_width: int = 640,
     episode_num: int = 1,
     show_viewer: bool = False,
+    device: str = "gpu"
 ) -> None:
-    gs.init(backend=gs.gpu, precision="32")  # cpuの方が早い？
+    if device == "gpu":
+        gs.init(backend=gs.gpu, precision="32")  # cpuの方が早い？
+    elif device == "cpu":
+        gs.init(backend=gs.cpu, precision="32")
     env: GenesisEnv | None = None
     dataset: LeRobotDataset = initialize_dataset(
         task, observation_height, observation_width
     )
-    dummy_dataset: LeRobotDataset | None = None
-    if task == "sound":
-        dummy_dataset = initialize_dataset(
-            "dummy", observation_height, observation_width
-        )
     ep: int = 0
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
@@ -140,7 +133,6 @@ def main(
         states: list[np.ndarray] = []
         images_front: list[Any] = []  # Can be PIL.Image or np.ndarray
         images_side: list[Any] = []  # Can be PIL.Image or np.ndarray
-        images_sound: list[Any] = []  # Can be PIL.Image or np.ndarray
         actions: list[np.ndarray] = []
         reward_greater_than_zero: bool = False
         for stage in stage_dict.keys():
@@ -153,7 +145,6 @@ def main(
                 states.append(obs["agent_pos"])
                 images_front.append(obs["front"])
                 images_side.append(obs["side"])
-                images_sound.append(obs["sound"])
                 actions.append(action)
                 if reward > 0:
                     reward_greater_than_zero = True
@@ -181,51 +172,29 @@ def main(
             else:
                 image_side_np = image_side_item
 
-            image_sound_item: Any = images_sound[i]
-            image_sound_np: np.ndarray
-            if isinstance(image_sound_item, Image.Image):
-                image_sound_np = np.array(image_sound_item)
-            else:
-                image_sound_np = image_sound_item
-
             dataset.add_frame(
                 {
                     "observation.state": states[i].astype(np.float32),
                     "action": actions[i].astype(np.float32),
                     "observation.images.front": image_front_np,
                     "observation.images.side": image_side_np,
-                    "observation.images.sound": image_sound_np,
-                    "task": "pick cube with sound",
+                    "task": "pick cube",
                 }
             )
-            if task == "sound" and dummy_dataset is not None:
-                dummy_dataset.add_frame(
-                    {
-                        "observation.state": states[i].astype(np.float32),
-                        "action": actions[i].astype(np.float32),
-                        "observation.images.front": image_front_np,
-                        "observation.images.side": image_side_np,
-                        "observation.images.sound": np.zeros_like(image_sound_np),
-                        "task": "pick cube without sound",
-                    }
-                )
         dataset.save_episode()
-        if task == "sound" and dummy_dataset is not None:
-            dummy_dataset.save_episode()
     if env is not None:
         env.close()
 
 
 if __name__ == "__main__":
-    task = "test"  # "test" or "sound"
-    # 20秒くらいのタスクを想定 → 合計600フレーム
+    task = "test"  # "test"
     stage_dict = {
         "hover": 100,  # cubeの上に手を持っていく
         "stabilize": 60,  # cubeの上で手を安定させる
         "grasp": 20,  # cubeを掴む
         "lift": 60,  # cubeを持ち上げる
-        "to_box": 100,  # cubeを箱の上に持っていく
-        "stabilize_box": 60,  # cubeを箱の上で安定させる
+        "to_box": 60,  # cubeを箱の上に持っていく
+        "stabilize_box": 40,  # cubeを箱の上で安定させる
         "release": 60,  # cubeを離す
     }
     main(
@@ -235,4 +204,5 @@ if __name__ == "__main__":
         observation_width=640,
         episode_num=1,
         show_viewer=False,
+        device="cpu",  # "cpu" or "gpu" cpuの方が早い
     )

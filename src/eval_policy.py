@@ -1,4 +1,4 @@
-# python3 -m src.eval_policy
+# uv run -m src.eval_policy
 
 from pathlib import Path
 
@@ -24,7 +24,7 @@ def main(
     checkpoint_step: str = "last",
 ) -> None:
     policy_list = ["act", "diffusion", "pi0", "tdmpc", "vqbet"]
-    task_list = ["test", "sound"]
+    task_list = ["test"]
     output_directory = Path(f"outputs/eval/{training_name}_{checkpoint_step}")
     output_directory.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -114,15 +114,6 @@ def main(
                     observation[key] = tensor_img.to(device).unsqueeze(0)
                 elif key == "observation.images.side":
                     img = numpy_observation["side"]
-                    img = img.copy()  # 負のstride対策
-                    tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
-                    if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
-                        tensor_img = tensor_img.permute(2, 0, 1)
-                    elif tensor_img.ndim == 2:
-                        tensor_img = tensor_img.unsqueeze(0)
-                    observation[key] = tensor_img.to(device).unsqueeze(0)
-                elif key == "observation.images.sound":
-                    img = numpy_observation["sound"]
                     img = img.copy()  # 負のstride対策
                     tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
                     if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:

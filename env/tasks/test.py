@@ -89,13 +89,6 @@ class TestTask:
             GUI=False,
         )
 
-        # サウンドカメラを追加
-        self.sound_cam = DummyCamera(
-            self.cubeA,
-            observation_height=self.observation_height,
-            observation_width=self.observation_width,
-        )
-
         self.scene.build()
         self.motors_dof = np.arange(7)
         self.fingers_dof = np.arange(7, 9)
@@ -114,12 +107,6 @@ class TestTask:
                     dtype=np.uint8,
                 ),
                 "side": spaces.Box(
-                    low=0,
-                    high=255,
-                    shape=(self.observation_height, self.observation_width, 3),
-                    dtype=np.uint8,
-                ),
-                "sound": spaces.Box(
                     low=0,
                     high=255,
                     shape=(self.observation_height, self.observation_width, 3),
@@ -181,7 +168,6 @@ class TestTask:
         self.scene.step()
         self.front_cam.start_recording()
         self.side_cam.start_recording()
-        self.sound_cam.start_recording()
         return self.get_obs(), {}
 
     def seed(self, seed: int) -> None:
@@ -241,16 +227,10 @@ class TestTask:
         assert (
             side_pixels.ndim == 3
         ), f"side_pixels shape {side_pixels.shape} is not 3D (H, W, 3)"
-        # soundカメラの画像を取得
-        sound_pixels = self.sound_cam.render()[0]
-        assert (
-            sound_pixels.ndim == 3
-        ), f"sound_pixels shape {sound_pixels.shape} is not 3D (H, W, 3)"
         obs = {
             "agent_pos": agent_pos,
             "front": front_pixels,
             "side": side_pixels,
-            "sound": sound_pixels,
         }
         return obs
 
@@ -259,34 +239,6 @@ class TestTask:
             save_to_filename=f"{file_name}_front.mp4", fps=fps
         )
         self.side_cam.stop_recording(save_to_filename=f"{file_name}_side.mp4", fps=fps)
-        self.sound_cam.stop_recording(
-            save_to_filename=f"{file_name}_sound.mp4", fps=fps
-        )
-
-
-class DummyCamera:
-    def __init__(
-        self,
-        target: Any,
-        observation_height: float,
-        observation_width: float,
-    ) -> None:
-        self.observation_height = int(observation_height)
-        self.observation_width = int(observation_width)
-
-    def start_recording(self) -> None:
-        pass
-
-    def stop_recording(self, save_to_filename: str, fps: int) -> None:
-        pass
-
-    def render(self) -> tuple[np.ndarray, None]:
-        # ダミーの画像を生成
-        dummy_image: np.ndarray = np.zeros(
-            (self.observation_height, self.observation_width, 3), dtype=np.uint8
-        )
-        return dummy_image, None
-
 
 if __name__ == "__main__":
     import cv2
@@ -300,8 +252,6 @@ if __name__ == "__main__":
     # 最後の画像を保存
     obs = task.get_obs()
     for key, value in obs.items():
-        if key == "agent_pos" or key == "sound":
-            continue
         # rgbの入れ替え
         if value.shape[2] == 3:
             value = cv2.cvtColor(value, cv2.COLOR_RGB2BGR)
