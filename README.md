@@ -46,7 +46,7 @@ uv run -m lerobot.record \
     --robot.type=so100_follower \
     --robot.port=/dev/ttyACM1 \
     --robot.id=so100_black_follower_arm \
-    --robot.cameras="{ front: {type: opencv, index_or_path: /dev/video8, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: /dev/video2, width: 640, height: 480, fps: 30}}" \
+    --robot.cameras="{ front: {type: opencv, index_or_path: /dev/video8, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: /dev/video0, width: 640, height: 480, fps: 30}}" \
     --teleop.type=so100_leader \
     --teleop.port=/dev/ttyACM0 \
     --teleop.id=so100_black_leader_arm \
@@ -110,20 +110,23 @@ uv run -m lerobot.scripts.train \
 ポリシーのチェックポイントを入力として、[`lerobot/record.py`](https://www.google.com/search?q=%5Bhttps://github.com/huggingface/lerobot/blob/main/lerobot/record.py%5D\(https://github.com/huggingface/lerobot/blob/main/lerobot/record.py\)) の `record` スクリプトを使用できます。例えば、10個の評価エピソードを記録するには、次のコマンドを実行します。
 
 ```bash
-uv run -m lerobot.record  \
+export DATASET_NAME=eval_policy
+uv run -m lerobot.record \
     --robot.type=so100_follower \
     --robot.port=/dev/ttyACM1 \
     --robot.id=so100_black_follower_arm \
-    --robot.cameras="{ front: {type: opencv, index_or_path: /dev/video8, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: /dev/video2, width: 640, height: 480, fps: 30}}" \
+    --robot.cameras="{ front: {type: opencv, index_or_path: /dev/video8, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: /dev/video0, width: 640, height: 480, fps: 30}}" \
     --teleop.type=so100_leader \
     --teleop.port=/dev/ttyACM0 \
     --teleop.id=so100_black_leader_arm \
     --display_data=false \
-    --dataset.repo_id=local/eval_so100 \
-    --dataset.root=dataset/eval_so100 \
+    --dataset.repo_id=local/${DATASET_NAME} \
+    --dataset.root=datasets/${DATASET_NAME} \
+    --dataset.num_episodes=1 \
     --dataset.single_task="Grab a handkerchief and open it" \
-    --policy.path=outputs/train/act-test_0/checkpoints/last/pretrained_model
+    --policy.path=outputs/train/act_open-handkerchief/checkpoints/last/pretrained_model
 ```
+
 ## TODO
 - [ ] aloha制御用のMRソフトを開発する
 - [ ] eval_policy.pyとmake_sim_dataset.pyをインライン引数に対応させる
