@@ -15,3 +15,5 @@ outputs/
 
 # archive
 *.zip
+
+.vscode/
