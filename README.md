@@ -126,6 +126,8 @@ uv run -m lerobot.record \
     --dataset.single_task="Grab a handkerchief and open it" \
     --policy.path=outputs/train/act_open-handkerchief/checkpoints/last/pretrained_model
 ```
+# シミュレーション
+## データセット作成
 
 ## TODO
 - [ ] aloha制御用のMRソフトを開発する
