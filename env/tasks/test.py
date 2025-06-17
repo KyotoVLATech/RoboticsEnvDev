@@ -31,7 +31,7 @@ class TestTask:
     def _build_scene(self, show_viewer):
         if not gs._initialized:
             print("Genesis is not initialized, initializing now...")
-            gs.init(backend=gs.gpu, precision="32", debug=False, logging_level="WARNING")
+            gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="WARNING")
         # シーンを初期化
         self.scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(
@@ -64,16 +64,16 @@ class TestTask:
         self.front_cam = self.scene.add_camera(
             res=(self.observation_width, self.observation_height),
             pos=(2.5, 0.0, 1.5),
-            lookat=(0.5, 0.0, 0.1),
-            fov=18,
+            lookat=(0.5, 0.0, 0.2),
+            fov=25, #18,
             GUI=False
         )
         # サイドカメラを追加
         self.side_cam = self.scene.add_camera(
             res=(self.observation_width, self.observation_height),
             pos=(0.5, 1.5, 1.5),
-            lookat=(0.5, 0.0, 0.0),
-            fov=20,
+            lookat=(0.5, 0.0, 0.1),
+            fov=30, # 20,
             GUI=False
         )
 
@@ -201,8 +201,8 @@ class TestTask:
 
 if __name__ == "__main__":
     import cv2
-    gs.init(backend=gs.gpu, precision="32")
-    task = TestTask(observation_height=480, observation_width=640, show_viewer=False)
+    gs.init(backend=gs.cpu, precision="32")
+    task = TestTask(observation_height=480, observation_width=640, show_viewer=True)
     task.reset()
     for _ in range(100):
         action = np.random.uniform(-1.0, 1.0, size=(AGENT_DIM,))

@@ -13,7 +13,6 @@ from PIL import Image
 def expert_policy(env, stage):
     task = env._env
     cube_pos = task.cubeA.get_pos().cpu().numpy()
-    cube_pos2 = task.cubeB.get_pos().cpu().numpy()
     box_pos = task.box.get_pos().cpu().numpy()
     # motors_dof = task.motors_dof
     # fingers_dof = task.fingers_dof
@@ -77,8 +76,8 @@ def initialize_dataset(task, height, width):
     )
     return lerobot_dataset
 
-def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
-    gs.init(backend=gs.gpu, precision="32") # cpuの方が早い？
+def main(task, task_description, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
+    gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="WARNING") # cpuの方が早い？
     env = None
     dataset = initialize_dataset(task, observation_height, observation_width)
     ep = 0
@@ -120,17 +119,23 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             if isinstance(image_side, Image.Image):
                 image_side = np.array(image_side)
 
-            dataset.add_frame({
-                "observation.state": states[i].astype(np.float32),
-                "action": actions[i].astype(np.float32),
-                "observation.images.front": image_front,
-                "observation.images.side": image_side,
-            })
+            dataset.add_frame(
+                {
+                    "observation.state": states[i].astype(np.float32),
+                    "action": actions[i].astype(np.float32),
+                    "observation.images.front": image_front,
+                    "observation.images.side": image_side,
+                },
+                task_description[task],
+            )
         dataset.save_episode()
     env.close()
 
 if __name__ == "__main__":
     task = "test" # [test]
+    task_description = {
+        "test": "Pick up a red cube and place it in a box.",
+    }
     stage_dict = { # 350
         "hover": 100, # cubeの上に手を持っていく
         "stabilize": 40, # cubeの上で手を安定させる
@@ -140,4 +145,4 @@ if __name__ == "__main__":
         "stabilize_box": 20, # cubeを箱の上で安定させる
         "release": 60, # cubeを離す
     }
-    main(task=task, stage_dict=stage_dict, observation_height=480, observation_width=640, episode_num=12, show_viewer=False)
+    main(task, task_description, stage_dict=stage_dict, observation_height=480, observation_width=640, episode_num=100, show_viewer=False)
