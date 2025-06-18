@@ -97,8 +97,8 @@ uv run -m lerobot.scripts.train \
     --dataset.repo_id=local/${DATASET_NAME} \
     --dataset.root=datasets/${DATASET_NAME} \
     --policy.path=lerobot/smolvla_base \
-    --output_dir=outputs/train/smolvla-${DATASET_NAME} \
-    --job_name=smolvla-${DATASET_NAME} \
+    --output_dir=outputs/train/smolvla_${DATASET_NAME} \
+    --job_name=smolvla_${DATASET_NAME} \
     --policy.device=cuda \
     --wandb.enable=true \
     --batch_size=8 \
@@ -128,6 +128,9 @@ uv run -m lerobot.record \
 ```
 # シミュレーション
 ## データセット作成
+```bash
+uv run src/make_sim_dataset.py
+```
 
 ## TODO
 - [ ] aloha制御用のMRソフトを開発する

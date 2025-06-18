@@ -10,6 +10,10 @@ import os
 import numpy as np
 from PIL import Image
 
+task_description = {
+    "test": "Pick up a red cube and place it in a box.",
+}
+    
 def expert_policy(env, stage):
     task = env._env
     cube_pos = task.cubeA.get_pos().cpu().numpy()
@@ -133,9 +137,6 @@ def main(task, task_description, stage_dict, observation_height=480, observation
 
 if __name__ == "__main__":
     task = "test" # [test]
-    task_description = {
-        "test": "Pick up a red cube and place it in a box.",
-    }
     stage_dict = { # 350
         "hover": 100, # cubeの上に手を持っていく
         "stabilize": 40, # cubeの上で手を安定させる
