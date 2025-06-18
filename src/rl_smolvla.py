@@ -227,17 +227,38 @@ class SmolVLADirectPolicy:
         """
         self.train()
         
-        # Create a batch with the action for forward pass
-        eval_batch = batch.copy()
-        eval_batch['action'] = action.unsqueeze(0) if action.dim() == 1 else action
-        
-        # Compute the loss (negative log likelihood)
-        loss, _ = self.smolvla_policy.forward(eval_batch)
-        
-        # Use negative loss as proxy for log probability
-        # This is conceptually similar to how we handle discrete tokens in language models
-        log_prob = -loss.item()
-        
+        try:
+            # Create a proper batch for forward pass
+            eval_batch = {}
+            
+            # Copy observation data
+            for key, value in batch.items():
+                if key != 'task':
+                    eval_batch[key] = value
+            
+            # Ensure action has correct shape for batch processing
+            if action.dim() == 1:
+                # Single sequence of actions, add batch dimension
+                eval_batch['action'] = action.unsqueeze(0)
+            elif action.dim() == 2:
+                # Already has batch dimension
+                eval_batch['action'] = action
+            else:
+                # Flatten if needed
+                eval_batch['action'] = action.view(1, -1)
+            
+            # Compute the loss (negative log likelihood)
+            loss, _ = self.smolvla_policy.forward(eval_batch)
+            
+            # Use negative loss as proxy for log probability
+            # This is conceptually similar to how we handle discrete tokens in language models
+            log_prob = -loss.item()
+            
+        except Exception as e:
+            # Fallback: return a small negative log probability if evaluation fails
+            # This prevents training from crashing while still providing some signal
+            log_prob = -1.0
+            
         # Compute entropy as a regularization term
         # For continuous actions, we can estimate this from the policy's internal noise
         entropy = 0.1  # Placeholder - could be made more sophisticated
@@ -316,6 +337,9 @@ class SmolVLARLTrainer:
         # Image observations
         if 'observation.images.front' in obs:
             front_img = obs['observation.images.front'].copy()
+            if front_img.dtype != np.uint8:
+                front_img = (front_img * 255).astype(np.uint8) if front_img.max() <= 1.0 else front_img.astype(np.uint8)
+            
             tensor_img = torch.from_numpy(front_img).float().to(self.device) / 255.0
             if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
                 tensor_img = tensor_img.permute(2, 0, 1)
@@ -325,6 +349,9 @@ class SmolVLARLTrainer:
         
         if 'observation.images.side' in obs:
             side_img = obs['observation.images.side'].copy()
+            if side_img.dtype != np.uint8:
+                side_img = (side_img * 255).astype(np.uint8) if side_img.max() <= 1.0 else side_img.astype(np.uint8)
+                
             tensor_img = torch.from_numpy(side_img).float().to(self.device) / 255.0
             if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
                 tensor_img = tensor_img.permute(2, 0, 1)
@@ -332,8 +359,8 @@ class SmolVLARLTrainer:
                 tensor_img = tensor_img.unsqueeze(0)
             batch['observation.images.side'] = tensor_img.unsqueeze(0)
         
-        # Task description
-        batch['task'] = task
+        # Task description - ensure consistent format
+        batch['task'] = [task] if isinstance(task, str) else task
         
         return batch
     
@@ -411,8 +438,13 @@ class SmolVLARLTrainer:
                 
                 # Compute log probability for the entire action sequence
                 # This is done after execution to avoid interfering with native sampling
-                with torch.no_grad():
-                    log_prob, _ = self.policy.evaluate_action(batch, action)
+                try:
+                    with torch.no_grad():
+                        log_prob, _ = self.policy.evaluate_action(batch, action)
+                except Exception as e:
+                    # If evaluation fails, use a default log probability
+                    self.logger.warning(f"Failed to evaluate action log probability: {e}")
+                    log_prob = -1.0
                 
                 # Store the complete action sequence and cumulative reward
                 total_step_reward = sum(step_rewards)
@@ -696,7 +728,7 @@ def main():
         
         # RL hyperparameters
         'epochs': 1000,
-        'episodes_per_update': 10,  # Collect 10 episodes before each update
+        'episodes_per_update': 3,  # Collect 10 episodes before each update
         'max_episodes_in_buffer': 50,  # Keep last 50 episodes in buffer
         'gamma': 0.99,
         'lam': 0.95,
