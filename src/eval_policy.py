@@ -182,7 +182,7 @@ def main(training_name, observation_height, observation_width, episode_num, show
             done = terminated or truncated
             step += 1
             # 評価用（必要なければ消す
-            if reward > 0:
+            if reward >= 1.0:
                 done = True
         total_reward = sum(rewards)
         print(f"Evaluation finished after {step} steps. Total reward: {total_reward:.4f}")

@@ -171,6 +171,12 @@ class TestTask:
             (box_pos[2] <= pos[2] <= box_pos[2] + box_size[2])
         )
         reward = 1.0 if cube_in_box else 0.0
+        if not cube_in_box:
+            # CubeAとEnd Effectorの距離を計算
+            eef_pos = self.eef.get_pos().cpu().numpy()
+            distance = np.linalg.norm(eef_pos - pos)
+            # 距離に基づいて報酬
+            reward = 0.3 * np.exp(-distance)
         return reward
 
     def get_obs(self):
