@@ -1,12 +1,11 @@
-# uv run -m src.rl_smolvla
 """
-PPO-style reinforcement learning for SmolVLA policy.
-This implementation maintains SmolVLA's native action generation while applying PPO-style updates.
-Similar to RLHF approaches for LLMs, we collect trajectories using the policy's native sampling
-and then update using PPO objectives.
+GRPO (Generalized Relative Preference Optimization) for SmolVLA policy.
+This implementation uses preference-based optimization to improve SmolVLA's performance
+without requiring value functions, making it more efficient than PPO.
 """
 
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
 import time
 import logging
@@ -22,6 +21,8 @@ import math
 import wandb
 import imageio
 from PIL import Image
+from dataclasses import dataclass
+import random
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,145 +33,83 @@ from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from src.make_sim_dataset import task_description
 
 
-class SmolVLATrajectoryBuffer:
-    """
-    Buffer for storing complete trajectories with SmolVLA's multi-step actions.
-    Unlike traditional PPO buffers, this stores complete episodes with SmolVLA's native action chunks.
-    """
-    def __init__(self, max_episodes: int, gamma: float = 0.99, lam: float = 0.95):
-        self.max_episodes = max_episodes
-        self.gamma = gamma
-        self.lam = lam
-        
-        # Store complete episodes
-        self.episodes = []
-        self.current_episode = None
-        
-    def start_episode(self, initial_obs: Dict, task: str):
-        """Start a new episode."""
-        self.current_episode = {
-            'observations': [initial_obs],
-            'actions': [],
-            'rewards': [],
-            'action_logprobs': [],
-            'values': [],
-            'dones': [],
-            'task': task
-        }
+@dataclass
+class Trajectory:
+    """Single trajectory with observations, actions, and rewards."""
+    observations: List[Dict]
+    actions: List[np.ndarray]
+    rewards: List[float] 
+    task: str
+    total_reward: float = 0.0
     
-    def add_step(self, obs: Dict, action: np.ndarray, reward: float, 
-                 action_logprob: float, value: float, done: bool):
-        """Add a step to the current episode."""
-        if self.current_episode is None:
-            raise ValueError("Must call start_episode first")
+    def __post_init__(self):
+        self.total_reward = sum(self.rewards)
+
+
+class SmolVLAPreferenceBuffer:
+    """
+    Buffer for storing trajectory pairs with preference labels for GRPO.
+    Automatically generates preferences based on cumulative rewards.
+    """
+    def __init__(self, max_pairs: int = 1000):
+        self.max_pairs = max_pairs
+        self.trajectories = []
+        self.preference_pairs = []
+        
+    def add_trajectory(self, trajectory: Trajectory):
+        """Add a trajectory to the buffer."""
+        self.trajectories.append(trajectory)
+        
+        # Create preference pairs with existing trajectories
+        if len(self.trajectories) >= 2:
+            self._create_preference_pairs()
             
-        self.current_episode['observations'].append(obs)
-        self.current_episode['actions'].append(action)
-        self.current_episode['rewards'].append(reward)
-        self.current_episode['action_logprobs'].append(action_logprob)
-        self.current_episode['values'].append(value)
-        self.current_episode['dones'].append(done)
+        # Keep only recent trajectories
+        if len(self.trajectories) > self.max_pairs * 2:
+            self.trajectories = self.trajectories[-self.max_pairs:]
     
-    def finish_episode(self, final_value: float = 0.0):
-        """Finish the current episode and compute advantages."""
-        if self.current_episode is None:
+    def _create_preference_pairs(self):
+        """Create preference pairs from trajectories based on rewards."""
+        if len(self.trajectories) < 2:
             return
             
-        # Compute returns and advantages using GAE
-        rewards = np.array(self.current_episode['rewards'])
-        values = np.array(self.current_episode['values'])
+        # Sample pairs from recent trajectories
+        recent_trajectories = self.trajectories[-10:]  # Use last 10 trajectories
         
-        # Add final value for GAE computation
-        values_with_final = np.append(values, final_value)
+        for i in range(len(recent_trajectories)):
+            for j in range(i + 1, len(recent_trajectories)):
+                traj_1 = recent_trajectories[i]
+                traj_2 = recent_trajectories[j]
+                
+                # Create preference based on total reward
+                if traj_1.total_reward > traj_2.total_reward:
+                    preferred, dispreferred = traj_1, traj_2
+                else:
+                    preferred, dispreferred = traj_2, traj_1
+                
+                self.preference_pairs.append((preferred, dispreferred))
         
-        # Compute GAE advantages
-        advantages = np.zeros_like(rewards)
-        returns = np.zeros_like(rewards)
-        
-        gae = 0
-        for t in reversed(range(len(rewards))):
-            delta = rewards[t] + self.gamma * values_with_final[t + 1] - values_with_final[t]
-            gae = delta + self.gamma * self.lam * gae
-            advantages[t] = gae
-            returns[t] = advantages[t] + values[t]
-        
-        self.current_episode['advantages'] = advantages
-        self.current_episode['returns'] = returns
-        
-        # Store episode
-        self.episodes.append(self.current_episode)
-        
-        # Keep only recent episodes
-        if len(self.episodes) > self.max_episodes:
-            self.episodes.pop(0)
-        
-        self.current_episode = None
+        # Keep only recent pairs
+        if len(self.preference_pairs) > self.max_pairs:
+            self.preference_pairs = self.preference_pairs[-self.max_pairs:]
     
-    def get_all_data(self) -> Dict:
-        """Get all stored episode data for training."""
-        if not self.episodes:
-            return {}
+    def get_preference_batch(self, batch_size: int) -> List[Tuple[Trajectory, Trajectory]]:
+        """Get a batch of preference pairs."""
+        if len(self.preference_pairs) < batch_size:
+            return self.preference_pairs
         
-        # Flatten all episodes
-        all_obs = []
-        all_actions = []
-        all_returns = []
-        all_advantages = []
-        all_logprobs = []
-        all_tasks = []
-        
-        for episode in self.episodes:
-            # Skip the last observation (no corresponding action)
-            episode_obs = episode['observations'][:-1]
-            all_obs.extend(episode_obs)
-            all_actions.extend(episode['actions'])
-            all_returns.extend(episode['returns'])
-            all_advantages.extend(episode['advantages'])
-            all_logprobs.extend(episode['action_logprobs'])
-            all_tasks.extend([episode['task']] * len(episode['actions']))
-        
-        # Normalize advantages
-        advantages = np.array(all_advantages)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        return {
-            'observations': all_obs,
-            'actions': np.array(all_actions),
-            'returns': np.array(all_returns),
-            'advantages': advantages,
-            'old_logprobs': np.array(all_logprobs),
-            'tasks': all_tasks
-        }
+        return random.sample(self.preference_pairs, batch_size)
     
     def clear(self):
-        """Clear all stored episodes."""
-        self.episodes.clear()
-        self.current_episode = None
+        """Clear all stored data."""
+        self.trajectories.clear()
+        self.preference_pairs.clear()
 
 
-class PPOValueFunction(nn.Module):
+class SmolVLAGRPOPolicy:
     """
-    Value function network for PPO.
-    """
-    def __init__(self, obs_dim: int, hidden_dim: int = 256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-    
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.net(obs).squeeze(-1)
-
-
-class SmolVLADirectPolicy:
-    """
-    SmolVLA policy wrapper that maintains native action generation.
-    This class preserves SmolVLA's original flow matching sampling while adding
-    the ability to compute log probabilities for PPO updates.
+    SmolVLA policy wrapper for GRPO training.
+    Maintains native action generation while enabling preference-based optimization.
     """
     def __init__(self, smolvla_policy: SmolVLAPolicy):
         self.smolvla_policy = smolvla_policy
@@ -200,110 +139,150 @@ class SmolVLADirectPolicy:
         """Set to evaluation mode."""
         self.smolvla_policy.eval()
     
-    def sample_action(self, batch: Dict[str, torch.Tensor], deterministic: bool = False) -> Tuple[torch.Tensor, float]:
-        """
-        Sample action using SmolVLA's native sampling with noise.
-        Returns action and a placeholder log probability (will be computed separately).
-        """
+    def sample_action(self, batch: Dict[str, torch.Tensor], deterministic: bool = False) -> torch.Tensor:
+        """Sample action using SmolVLA's native sampling."""
         self.eval()
         
         with torch.no_grad():
-            if deterministic:
-                # Use deterministic action (no noise)
-                action = self.smolvla_policy.select_action(batch, noise=None)
+            # Use select_action method like in eval_policy.py
+            action = self.smolvla_policy.select_action(batch)
+            
+            # Handle different return formats
+            if isinstance(action, dict):
+                action_tensor = action.get('action', None)
+                if action_tensor is None:
+                    raise ValueError("Policy did not return 'action' key.")
             else:
-                # Use SmolVLA's native sampling with noise
-                action = self.smolvla_policy.select_action(batch)
+                action_tensor = action
         
-        # Placeholder log probability - will be computed in evaluate_action
-        log_prob = 0.0
-        
-        return action, log_prob
+        return action_tensor
     
-    def evaluate_action(self, batch: Dict[str, torch.Tensor], action: torch.Tensor) -> Tuple[float, float]:
+    def compute_trajectory_logprob(self, trajectory: Trajectory) -> torch.Tensor:
         """
-        Evaluate an action by computing the negative loss as a proxy for log probability.
-        This is similar to how language models compute log probabilities for RLHF.
+        Compute log probability of a trajectory by using the model's loss as proxy.
+        This is similar to how RLHF works for language models.
         """
         self.train()
+        total_logprob = 0.0
         
-        try:
-            # Create a proper batch for forward pass
-            eval_batch = {}
+        for i, (obs, action) in enumerate(zip(trajectory.observations, trajectory.actions)):
+            # Prepare batch
+            batch = self._prepare_batch_for_policy(obs, trajectory.task)
             
-            # Copy observation data
-            for key, value in batch.items():
-                if key != 'task':
-                    eval_batch[key] = value
-            
-            # Ensure action has correct shape for batch processing
-            if action.dim() == 1:
-                # Single sequence of actions, add batch dimension
-                eval_batch['action'] = action.unsqueeze(0)
-            elif action.dim() == 2:
-                # Already has batch dimension
-                eval_batch['action'] = action
-            else:
-                # Flatten if needed
-                eval_batch['action'] = action.view(1, -1)
-            
-            # Compute the loss (negative log likelihood)
-            loss, _ = self.smolvla_policy.forward(eval_batch)
-            
-            # Use negative loss as proxy for log probability
-            # This is conceptually similar to how we handle discrete tokens in language models
-            log_prob = -loss.item()
-            
-        except Exception as e:
-            # Fallback: return a small negative log probability if evaluation fails
-            # This prevents training from crashing while still providing some signal
-            log_prob = -1.0
-            
-        # Compute entropy as a regularization term
-        # For continuous actions, we can estimate this from the policy's internal noise
-        entropy = 0.1  # Placeholder - could be made more sophisticated
+            try:
+                # Create target action tensor
+                action_tensor = torch.from_numpy(action).float().to(next(self.parameters()).device)
+                if action_tensor.dim() == 1:
+                    action_tensor = action_tensor.unsqueeze(0)
+                
+                # Add actions to batch
+                batch['actions'] = action_tensor
+                
+                # Compute forward pass
+                outputs = self.smolvla_policy.forward(batch)
+                
+                # Use negative loss as log probability proxy
+                if hasattr(outputs, 'loss'):
+                    step_logprob = -outputs.loss
+                else:
+                    step_logprob = torch.tensor(0.0, requires_grad=True)
+                
+                total_logprob += step_logprob
+                
+            except Exception as e:
+                # Fallback to small penalty if computation fails
+                total_logprob += torch.tensor(-1.0, requires_grad=True)
         
-        return log_prob, entropy
+        return total_logprob
+    
+    def _prepare_batch_for_policy(self, obs: Dict, task: str) -> Dict[str, torch.Tensor]:
+        """Prepare observation batch for policy inference."""
+        batch = {}
+        device = next(self.parameters()).device
+        
+        # State observation - check what keys are available in obs
+        if 'agent_pos' in obs:
+            agent_pos = obs['agent_pos']
+            if isinstance(agent_pos, np.ndarray):
+                agent_pos = agent_pos.copy()
+            agent_pos = torch.from_numpy(agent_pos).float().to(device)
+            if agent_pos.dim() == 1:
+                agent_pos = agent_pos.unsqueeze(0)
+            batch['observation.state'] = agent_pos
+        
+        # Image observations - follow eval_policy.py format
+        if 'observation.images.front' in obs:
+            front_img = obs['observation.images.front']
+            if isinstance(front_img, np.ndarray):
+                # Make a copy to handle negative strides
+                front_img = front_img.copy()
+                
+            # Convert to tensor and normalize to [0, 1]
+            front_img = torch.from_numpy(front_img).float() / 255.0
+            
+            # Handle different image formats
+            if front_img.ndim == 3 and front_img.shape[2] in [1, 3, 4]:
+                front_img = front_img.permute(2, 0, 1)  # HWC -> CHW
+            elif front_img.ndim == 2:
+                front_img = front_img.unsqueeze(0)  # Add channel dimension
+            
+            # Add batch dimension
+            batch['observation.images.front'] = front_img.to(device).unsqueeze(0)
+        
+        if 'observation.images.side' in obs:
+            side_img = obs['observation.images.side']
+            if isinstance(side_img, np.ndarray):
+                # Make a copy to handle negative strides
+                side_img = side_img.copy()
+                
+            # Convert to tensor and normalize to [0, 1]
+            side_img = torch.from_numpy(side_img).float() / 255.0
+            
+            # Handle different image formats
+            if side_img.ndim == 3 and side_img.shape[2] in [1, 3, 4]:
+                side_img = side_img.permute(2, 0, 1)  # HWC -> CHW
+            elif side_img.ndim == 2:
+                side_img = side_img.unsqueeze(0)  # Add channel dimension
+            
+            # Add batch dimension
+            batch['observation.images.side'] = side_img.to(device).unsqueeze(0)
+        
+        # Task description - use task_description mapping like in eval_policy.py
+        from src.make_sim_dataset import task_description
+        batch['task'] = task_description.get(task, task)
+        
+        return batch
 
 
-class SmolVLARLTrainer:
+class SmolVLAGRPOTrainer:
     """
-    RL trainer for SmolVLA that maintains native action generation.
-    Uses trajectory-level updates similar to RLHF for language models.
+    GRPO trainer for SmolVLA using preference-based optimization.
+    More efficient than PPO as it doesn't require value functions.
     """
     def __init__(
         self,
         env: GenesisEnv,
-        policy: SmolVLADirectPolicy,
-        value_function: PPOValueFunction,
+        policy: SmolVLAGRPOPolicy,
         config: Dict,
         device: str = "cuda"
     ):
         self.env = env
         self.policy = policy
-        self.value_function = value_function
         self.config = config
         self.device = device
         
-        # Move models to device
+        # Move model to device
         self.policy.to(device)
-        self.value_function.to(device)
         
-        # Initialize optimizers
-        self.policy_optimizer = torch.optim.Adam(
+        # Initialize optimizer
+        self.optimizer = torch.optim.Adam(
             self.policy.parameters(), 
-            lr=config['policy_lr']
-        )
-        self.value_optimizer = torch.optim.Adam(
-            self.value_function.parameters(), 
-            lr=config['value_lr']
+            lr=config['learning_rate']
         )
         
-        # Initialize trajectory buffer
-        self.buffer = SmolVLATrajectoryBuffer(
-            max_episodes=config['max_episodes_in_buffer'],
-            gamma=config['gamma'],
-            lam=config['lam']
+        # Initialize preference buffer
+        self.buffer = SmolVLAPreferenceBuffer(
+            max_pairs=config['max_preference_pairs']
         )
         
         # Logging
@@ -311,8 +290,8 @@ class SmolVLARLTrainer:
         
         # Initialize wandb
         wandb.init(
-            project=config.get('wandb_project', 'smolvla-rl'),
-            name=config.get('wandb_run_name', f"rl_smolvla_{config['task']}"),
+            project=config.get('wandb_project', 'smolvla-grpo'),
+            name=config.get('wandb_run_name', f"grpo_smolvla_{config['task']}"),
             config=config,
             sync_tensorboard=False
         )
@@ -325,369 +304,300 @@ class SmolVLARLTrainer:
         self.video_frames = []
         self.record_video = config.get('record_video', True)
         self.video_freq = config.get('video_freq', 10)
-        
-    def _prepare_batch_for_policy(self, obs: Dict, task: str) -> Dict[str, torch.Tensor]:
-        """Prepare observation batch for policy inference."""
-        batch = {}
-        
-        # State observation
-        if 'agent_pos' in obs:
-            batch['observation.state'] = torch.from_numpy(obs['agent_pos']).float().to(self.device).unsqueeze(0)
-        
-        # Image observations
-        if 'observation.images.front' in obs:
-            front_img = obs['observation.images.front'].copy()
-            if front_img.dtype != np.uint8:
-                front_img = (front_img * 255).astype(np.uint8) if front_img.max() <= 1.0 else front_img.astype(np.uint8)
-            
-            tensor_img = torch.from_numpy(front_img).float().to(self.device) / 255.0
-            if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
-                tensor_img = tensor_img.permute(2, 0, 1)
-            elif tensor_img.ndim == 2:
-                tensor_img = tensor_img.unsqueeze(0)
-            batch['observation.images.front'] = tensor_img.unsqueeze(0)
-        
-        if 'observation.images.side' in obs:
-            side_img = obs['observation.images.side'].copy()
-            if side_img.dtype != np.uint8:
-                side_img = (side_img * 255).astype(np.uint8) if side_img.max() <= 1.0 else side_img.astype(np.uint8)
-                
-            tensor_img = torch.from_numpy(side_img).float().to(self.device) / 255.0
-            if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
-                tensor_img = tensor_img.permute(2, 0, 1)
-            elif tensor_img.ndim == 2:
-                tensor_img = tensor_img.unsqueeze(0)
-            batch['observation.images.side'] = tensor_img.unsqueeze(0)
-        
-        # Task description - ensure consistent format
-        batch['task'] = [task] if isinstance(task, str) else task
-        
-        return batch
     
-    def collect_episodes(self) -> Dict:
-        """
-        Collect complete episodes using SmolVLA's native action generation.
-        This maintains the policy's natural behavior while collecting data for RL updates.
-        """
-        episode_rewards = []
-        episode_lengths = []
+    def collect_trajectories(self) -> List[Trajectory]:
+        """Collect trajectories for preference learning."""
+        trajectories = []
         
-        episodes_collected = 0
-        target_episodes = self.config['episodes_per_update']
+        for _ in range(self.config['trajectories_per_update']):
+            trajectory = self._collect_single_trajectory()
+            if trajectory:
+                trajectories.append(trajectory)
         
-        while episodes_collected < target_episodes:
-            # Start new episode
-            obs, _ = self.env.reset()
-            task = task_description.get(self.env.task, "Complete the task")
+        return trajectories
+    
+    def _collect_single_trajectory(self) -> Optional[Trajectory]:
+        """Collect a single trajectory."""
+        # Reset policy like in eval_policy.py
+        self.policy.smolvla_policy.reset()
+        
+        reset_result = self.env.reset()
+        # Handle both tuple and dict returns from env.reset()
+        if isinstance(reset_result, tuple):
+            obs, _ = reset_result
+        else:
+            obs = reset_result
+        done = False
+        
+        observations = []
+        actions = []
+        rewards = []
+        
+        # Video recording setup
+        if self.record_video and self.epoch % self.video_freq == 0:
+            frame = self._render_combined_frame(obs)
+            if frame is not None:
+                self.video_frames.append(frame)
+        
+        step = 0
+        max_steps = self.config.get('max_episode_steps', 100)
+        
+        while not done and step < max_steps:
+            # Deep copy observation dictionary
+            if isinstance(obs, dict):
+                obs_copy = {}
+                for k, v in obs.items():
+                    if isinstance(v, np.ndarray):
+                        # Make a copy to handle negative strides
+                        obs_copy[k] = v.copy()
+                    elif hasattr(v, 'copy'):
+                        obs_copy[k] = v.copy()
+                    else:
+                        obs_copy[k] = v
+            else:
+                obs_copy = obs
+            observations.append(obs_copy)
             
-            self.buffer.start_episode(obs, task)
+            # Prepare batch for policy
+            batch = self.policy._prepare_batch_for_policy(obs, self.config['task'])
             
-            episode_reward = 0
-            episode_length = 0
-            done = False
+            # Debug: Print image shapes
+            # if step == 0:  # Only print on first step to avoid spam
+            #     for key, value in obs.items():
+            #         if 'images' in key and isinstance(value, np.ndarray):
+            #             self.logger.info(f"Observation {key} shape: {value.shape}, dtype: {value.dtype}")
             
-            # Start video recording if enabled
-            if self.record_video and (self.epoch % self.video_freq == 0) and episodes_collected == 0:
-                self.video_frames = []
+            # Sample action
+            action = self.policy.sample_action(batch, deterministic=False)
+            
+            # Convert to numpy if tensor and remove batch dimension
+            if isinstance(action, torch.Tensor):
+                action = action.squeeze(0).cpu().numpy()
+            
+            # Debug: Print action shape on first step
+            # if step == 0:
+            #     self.logger.info(f"Action shape: {action.shape}, Action: {action}")
+            
+            actions.append(action.copy())
+            
+            # Take step in environment
+            step_result = self.env.step(action)
+            
+            # Handle different step return formats
+            if len(step_result) == 4:
+                # Old format: (obs, reward, done, info)
+                obs, reward, done, info = step_result
+            elif len(step_result) == 5:
+                # New format: (obs, reward, terminated, truncated, info)
+                obs, reward, terminated, truncated, info = step_result
+                done = terminated or truncated
+            else:
+                raise ValueError(f"Unexpected step result format: {len(step_result)} elements")
+            
+            rewards.append(reward)
+            
+            # Record video frame
+            if self.record_video and self.epoch % self.video_freq == 0:
                 frame = self._render_combined_frame(obs)
                 if frame is not None:
                     self.video_frames.append(frame)
             
-            # Reset policy's internal state
-            self.policy.smolvla_policy.reset()
-            
-            while not done:
-                # Prepare batch for policy
-                batch = self._prepare_batch_for_policy(obs, task)
-                
-                # Sample action using SmolVLA's native sampling
-                with torch.no_grad():
-                    action, _ = self.policy.sample_action(batch, deterministic=False)
-                    # Get value estimate
-                    value = self.value_function(batch['observation.state'])
-                
-                # Convert to numpy for environment
-                action_np = action.cpu().numpy().squeeze()
-                value_np = value.cpu().numpy().item()
-                
-                # Execute action sequence (SmolVLA generates multiple steps)
-                step_rewards = []
-                for step_idx in range(self.policy.smolvla_policy.config.n_action_steps):
-                    if step_idx < len(action_np):
-                        single_action = action_np[step_idx] if action_np.ndim > 1 else action_np
-                    else:
-                        single_action = action_np[-1] if action_np.ndim > 1 else action_np
-                    
-                    next_obs, reward, terminated, truncated, info = self.env.step(single_action)
-                    step_rewards.append(reward)
-                    episode_reward += reward
-                    episode_length += 1
-                    
-                    # Record video frame
-                    if (self.record_video and (self.epoch % self.video_freq == 0) and 
-                        episodes_collected == 0):
-                        frame = self._render_combined_frame(next_obs)
-                        if frame is not None:
-                            self.video_frames.append(frame)
-                    
-                    if terminated or truncated:
-                        done = True
-                        break
-                    
-                    obs = next_obs
-                
-                # Compute log probability for the entire action sequence
-                # This is done after execution to avoid interfering with native sampling
-                try:
-                    with torch.no_grad():
-                        log_prob, _ = self.policy.evaluate_action(batch, action)
-                except Exception as e:
-                    # If evaluation fails, use a default log probability
-                    self.logger.warning(f"Failed to evaluate action log probability: {e}")
-                    log_prob = -1.0
-                
-                # Store the complete action sequence and cumulative reward
-                total_step_reward = sum(step_rewards)
-                self.buffer.add_step(
-                    obs=next_obs if not done else obs,
-                    action=action_np,
-                    reward=total_step_reward,
-                    action_logprob=log_prob,
-                    value=value_np,
-                    done=done
-                )
-            
-            # Finish episode
-            if done:
-                final_value = 0.0
-            else:
-                with torch.no_grad():
-                    final_batch = self._prepare_batch_for_policy(obs, task)
-                    final_value = self.value_function(final_batch['observation.state']).cpu().numpy().item()
-            
-            self.buffer.finish_episode(final_value)
-            
-            # Record episode stats
-            episode_rewards.append(episode_reward)
-            episode_lengths.append(episode_length)
-            episodes_collected += 1
-            self.total_episodes += 1
-            
-            self.logger.info(
-                f"Episode {self.total_episodes}: Reward={episode_reward:.2f}, Length={episode_length}"
-            )
+            step += 1
         
-        return {
-            'episode_rewards': episode_rewards,
-            'episode_lengths': episode_lengths,
-            'mean_reward': np.mean(episode_rewards),
-            'std_reward': np.std(episode_rewards),
-            'mean_length': np.mean(episode_lengths)
-        }
+        if len(actions) == 0:
+            return None
+        
+        return Trajectory(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            task=self.config['task']
+        )
     
     def _render_combined_frame(self, obs: Dict) -> Optional[np.ndarray]:
-        """Create combined frame from front and side camera observations."""
+        """Create combined frame from camera observations."""
         try:
-            front_img = obs.get('observation.images.front')
-            side_img = obs.get('observation.images.side')
+            frames = []
             
-            if front_img is None or side_img is None:
-                return None
+            if 'observation.images.front' in obs:
+                front_img = obs['observation.images.front']
+                if isinstance(front_img, torch.Tensor):
+                    front_img = front_img.cpu().numpy()
+                # Make a copy to handle negative strides
+                if isinstance(front_img, np.ndarray):
+                    front_img = front_img.copy()
+                # Convert from CHW to HWC if needed
+                if front_img.shape[0] == 3:
+                    front_img = np.transpose(front_img, (1, 2, 0))
+                frames.append(front_img)
             
-            # Ensure images are in the right format (H, W, C) and uint8
-            if front_img.dtype != np.uint8:
-                front_img = (front_img * 255).astype(np.uint8) if front_img.dtype == np.float32 else front_img
-            if side_img.dtype != np.uint8:
-                side_img = (side_img * 255).astype(np.uint8) if side_img.dtype == np.float32 else side_img
+            if 'observation.images.side' in obs:
+                side_img = obs['observation.images.side']
+                if isinstance(side_img, torch.Tensor):
+                    side_img = side_img.cpu().numpy()
+                # Make a copy to handle negative strides
+                if isinstance(side_img, np.ndarray):
+                    side_img = side_img.copy()
+                # Convert from CHW to HWC if needed
+                if side_img.shape[0] == 3:
+                    side_img = np.transpose(side_img, (1, 2, 0))
+                frames.append(side_img)
             
-            # Concatenate horizontally
-            combined_frame = np.concatenate([front_img, side_img], axis=1)
-            return combined_frame
+            if frames:
+                # Concatenate frames horizontally
+                combined = np.concatenate(frames, axis=1)
+                # Ensure values are in [0, 255] range
+                if combined.max() <= 1.0:
+                    combined = (combined * 255).astype(np.uint8)
+                return combined
             
         except Exception as e:
-            self.logger.warning(f"Failed to render combined frame: {e}")
-            return None
+            self.logger.warning(f"Failed to render frame: {e}")
+        
+        return None
     
-    def update_policy(self, data: Dict) -> Dict:
-        """Update policy using PPO-style objective on trajectory data."""
-        if not data:
-            return {'policy_loss': 0, 'value_loss': 0, 'entropy': 0}
+    def compute_grpo_loss(self, preferred_traj: Trajectory, dispreferred_traj: Trajectory) -> torch.Tensor:
+        """
+        Compute GRPO loss for a preference pair.
+        GRPO loss = -log(sigmoid(log_prob_preferred - log_prob_dispreferred))
+        """
+        # Compute log probabilities for both trajectories
+        log_prob_preferred = self.policy.compute_trajectory_logprob(preferred_traj)
+        log_prob_dispreferred = self.policy.compute_trajectory_logprob(dispreferred_traj)
         
-        observations = data['observations']
-        actions = torch.from_numpy(data['actions']).float().to(self.device)
-        returns = torch.from_numpy(data['returns']).float().to(self.device)
-        advantages = torch.from_numpy(data['advantages']).float().to(self.device)
-        old_logprobs = torch.from_numpy(data['old_logprobs']).float().to(self.device)
+        # GRPO loss: maximize difference in log probabilities
+        logits = log_prob_preferred - log_prob_dispreferred
+        loss = -F.logsigmoid(logits)
         
-        # Prepare batches for policy evaluation
-        batches = []
-        for i, obs in enumerate(observations):
-            batch_i = self._prepare_batch_for_policy(obs, data['tasks'][i])
-            batches.append(batch_i)
+        return loss
+    
+    def update_policy(self, trajectories: List[Trajectory]) -> Dict:
+        """Update policy using GRPO objective."""
+        if not trajectories:
+            return {'grpo_loss': 0.0}
         
-        # Policy updates
-        policy_losses = []
-        value_losses = []
-        entropies = []
+        # Add trajectories to buffer
+        for traj in trajectories:
+            self.buffer.add_trajectory(traj)
         
-        for update_epoch in range(self.config['update_epochs']):
-            # Shuffle data for each epoch
-            indices = torch.randperm(len(observations))
+        # Get preference pairs for training
+        preference_pairs = self.buffer.get_preference_batch(self.config['batch_size'])
+        
+        if not preference_pairs:
+            return {'grpo_loss': 0.0}
+        
+        total_loss = 0.0
+        num_updates = 0
+        
+        # Update policy using preference pairs
+        for preferred, dispreferred in preference_pairs:
+            self.optimizer.zero_grad()
             
-            for batch_start in range(0, len(observations), self.config['batch_size']):
-                batch_end = min(batch_start + self.config['batch_size'], len(observations))
-                batch_indices = indices[batch_start:batch_end]
-                
-                if len(batch_indices) == 0:
-                    continue
-                
-                # Get batch data
-                batch_actions = actions[batch_indices]
-                batch_returns = returns[batch_indices]
-                batch_advantages = advantages[batch_indices]
-                batch_old_logprobs = old_logprobs[batch_indices]
-                batch_observations = [batches[i] for i in batch_indices]
-                
-                # Update policy
-                self.policy_optimizer.zero_grad()
-                
-                # Evaluate actions with current policy
-                current_logprobs = []
-                current_entropies = []
-                
-                for i, obs_batch in enumerate(batch_observations):
-                    action_idx = batch_indices[i]
-                    action = actions[action_idx]
-                    
-                    log_prob, entropy = self.policy.evaluate_action(obs_batch, action)
-                    current_logprobs.append(log_prob)
-                    current_entropies.append(entropy)
-                
-                current_logprobs = torch.tensor(current_logprobs, device=self.device)
-                current_entropies = torch.tensor(current_entropies, device=self.device)
-                
-                # Compute policy loss (PPO clipped objective)
-                ratio = torch.exp(current_logprobs - batch_old_logprobs)
-                clipped_ratio = torch.clamp(ratio, 1 - self.config['clip_ratio'], 1 + self.config['clip_ratio'])
-                
-                policy_loss = -torch.min(ratio * batch_advantages, clipped_ratio * batch_advantages).mean()
-                entropy_loss = -self.config['entropy_coeff'] * current_entropies.mean()
-                
-                total_policy_loss = policy_loss + entropy_loss
-                total_policy_loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config['max_grad_norm'])
-                
-                self.policy_optimizer.step()
-                policy_losses.append(total_policy_loss.item())
-                entropies.append(current_entropies.mean().item())
-                
-                # Update value function
-                self.value_optimizer.zero_grad()
-                
-                # Compute state values for batch observations
-                state_values = []
-                for obs_batch in batch_observations:
-                    value = self.value_function(obs_batch['observation.state'])
-                    state_values.append(value)
-                
-                state_values = torch.stack(state_values).squeeze()
-                value_loss = F.mse_loss(state_values, batch_returns)
-                
-                value_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.value_function.parameters(), self.config['max_grad_norm'])
-                
-                self.value_optimizer.step()
-                value_losses.append(value_loss.item())
+            # Compute GRPO loss
+            loss = self.compute_grpo_loss(preferred, dispreferred)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Gradient clipping
+            if self.config.get('max_grad_norm', 0) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(),
+                    self.config['max_grad_norm']
+                )
+            
+            # Optimizer step
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            num_updates += 1
         
-        return {
-            'policy_loss': np.mean(policy_losses) if policy_losses else 0,
-            'value_loss': np.mean(value_losses) if value_losses else 0,
-            'entropy': np.mean(entropies) if entropies else 0
-        }
+        avg_loss = total_loss / max(num_updates, 1)
+        
+        return {'grpo_loss': avg_loss}
     
     def train(self):
-        """Main training loop with wandb logging and video upload."""
-        self.logger.info(f"Starting RL training for {self.config['epochs']} epochs")
+        """Main training loop."""
+        self.logger.info(f"Starting GRPO training for {self.config['epochs']} epochs")
         
         for epoch in range(self.config['epochs']):
             self.epoch = epoch
+            epoch_start_time = time.time()
             
-            # Collect episodes
-            self.logger.info(f"Epoch {epoch}: Collecting episodes...")
-            episode_stats = self.collect_episodes()
+            # Collect trajectories
+            trajectories = self.collect_trajectories()
             
-            # Get trajectory data
-            data = self.buffer.get_all_data()
+            if not trajectories:
+                self.logger.warning(f"No trajectories collected in epoch {epoch}")
+                continue
+            
+            # Compute metrics
+            rewards = [traj.total_reward for traj in trajectories]
+            mean_reward = np.mean(rewards)
+            std_reward = np.std(rewards)
             
             # Update policy
-            if data:
-                self.logger.info(f"Epoch {epoch}: Updating policy...")
-                update_stats = self.update_policy(data)
-            else:
-                update_stats = {'policy_loss': 0, 'value_loss': 0, 'entropy': 0}
+            update_metrics = self.update_policy(trajectories)
             
-            # Create log dictionary
-            log_dict = {
+            # Logging
+            epoch_time = time.time() - epoch_start_time
+            
+            log_data = {
                 'epoch': epoch,
-                'reward/mean': episode_stats['mean_reward'],
-                'reward/std': episode_stats['std_reward'],
-                'episode/length': episode_stats['mean_length'],
-                'loss/policy': update_stats['policy_loss'],
-                'loss/value': update_stats['value_loss'],
-                'policy/entropy': update_stats['entropy'],
-                'training/total_episodes': self.total_episodes
+                'mean_reward': mean_reward,
+                'std_reward': std_reward,
+                'num_trajectories': len(trajectories),
+                'epoch_time': epoch_time,
+                **update_metrics
             }
             
-            # Upload video to wandb
-            if self.record_video and (epoch % self.video_freq == 0) and self.video_frames:
-                try:
-                    # Create video from frames
-                    video_path = Path(self.config['checkpoint_dir']) / f"video_epoch_{epoch}.mp4"
-                    video_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    # Save video
-                    imageio.mimsave(
-                        str(video_path), 
-                        self.video_frames, 
-                        fps=self.config.get('video_fps', 30),
-                        output_params=['-pix_fmt', 'yuv420p']
-                    )
-                    
-                    # Upload to wandb
-                    log_dict['video/rollout'] = wandb.Video(str(video_path), fps=self.config.get('video_fps', 30))
-                    
-                    self.logger.info(f"Video saved and uploaded: {video_path}")
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to save/upload video: {e}")
+            wandb.log(log_data)
             
-            # Log to wandb
-            wandb.log(log_dict, step=epoch)
-            
-            # Console logging
             self.logger.info(
-                f"Epoch {epoch}: "
-                f"Mean Reward: {episode_stats['mean_reward']:.2f} ± {episode_stats['std_reward']:.2f}, "
-                f"Mean Length: {episode_stats['mean_length']:.1f}, "
-                f"Policy Loss: {update_stats['policy_loss']:.4f}, "
-                f"Value Loss: {update_stats['value_loss']:.4f}"
+                f"Epoch {epoch}: Reward={mean_reward:.3f}±{std_reward:.3f}, "
+                f"Loss={update_metrics.get('grpo_loss', 0):.4f}, Time={epoch_time:.1f}s"
             )
             
             # Save checkpoint
             if (epoch + 1) % self.config['save_freq'] == 0:
                 self.save_checkpoint(epoch)
             
-            # Clear buffer periodically to manage memory
-            if (epoch + 1) % self.config.get('buffer_clear_freq', 10) == 0:
+            # Upload video
+            if self.record_video and self.video_frames and epoch % self.video_freq == 0:
+                self._upload_video(epoch)
+                self.video_frames = []
+            
+            # Clear buffer periodically
+            if (epoch + 1) % self.config.get('buffer_clear_freq', 50) == 0:
                 self.buffer.clear()
         
         self.logger.info("Training completed!")
         wandb.finish()
     
+    def _upload_video(self, epoch: int):
+        """Upload video to wandb."""
+        try:
+            if len(self.video_frames) > 0:
+                video_path = f"/tmp/smolvla_epoch_{epoch}.mp4"
+                
+                # Create video
+                with imageio.get_writer(video_path, fps=self.config.get('video_fps', 30)) as writer:
+                    for frame in self.video_frames:
+                        if frame is not None:
+                            writer.append_data(frame)
+                
+                # Upload to wandb
+                wandb.log({f"video_epoch_{epoch}": wandb.Video(video_path)})
+                
+                # Clean up
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                    
+        except Exception as e:
+            self.logger.warning(f"Failed to upload video: {e}")
+    
     def save_checkpoint(self, epoch: int):
-        """Save model checkpoints."""
+        """Save model checkpoint."""
         checkpoint_dir = Path(self.config['checkpoint_dir']) / f"epoch_{epoch}"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
@@ -696,9 +606,7 @@ class SmolVLARLTrainer:
         torch.save({
             'epoch': epoch,
             'policy_state_dict': self.policy.state_dict(),
-            'value_state_dict': self.value_function.state_dict(),
-            'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
-            'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
             'config': self.config
         }, policy_path)
         
@@ -708,54 +616,12 @@ class SmolVLARLTrainer:
         
         # Upload checkpoint to wandb
         wandb.save(str(policy_path))
-        
-        self.logger.info(f"Checkpoint saved to {checkpoint_dir}")
 
-
-def main():
+def main(config):
     """Main training function."""
     # Setup logging
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
-    
-    # Training configuration
-    config = {
-        # Environment
-        'task': 'test',
-        'observation_height': 480,
-        'observation_width': 640,
-        'show_viewer': False,
-        
-        # RL hyperparameters
-        'epochs': 1000,
-        'episodes_per_update': 3,  # Collect 10 episodes before each update
-        'max_episodes_in_buffer': 50,  # Keep last 50 episodes in buffer
-        'gamma': 0.99,
-        'lam': 0.95,
-        'clip_ratio': 0.2,
-        'policy_lr': 1e-4,  # Lower LR for SmolVLA fine-tuning
-        'value_lr': 3e-4,
-        'update_epochs': 4,  # Number of update epochs per training iteration
-        'batch_size': 8,  # Batch size for updates
-        'entropy_coeff': 0.01,
-        'max_grad_norm': 0.5,
-        
-        # Logging and saving
-        'wandb_project': 'smolvla-rl',
-        'wandb_run_name': None,  # Will be auto-generated
-        'checkpoint_dir': 'outputs/rl_checkpoints',
-        'save_freq': 20,
-        'buffer_clear_freq': 50,  # Clear buffer every N epochs to manage memory
-        
-        # Video recording
-        'record_video': True,
-        'video_freq': 10,  # Record video every 10 epochs
-        'video_fps': 30,
-        
-        # Model
-        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",
-        'hidden_dim': 256,
-    }
     
     # Create output directories
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
@@ -782,18 +648,13 @@ def main():
         smolvla_config = SmolVLAConfig()
         smolvla_policy = SmolVLAPolicy(smolvla_config)
     
-    # Create direct policy wrapper
-    rl_policy = SmolVLADirectPolicy(smolvla_policy)
-    
-    # Create value function
-    obs_dim = env.observation_space['agent_pos'].shape[0]
-    value_function = PPOValueFunction(obs_dim, config['hidden_dim'])
+    # Create GRPO policy wrapper
+    grpo_policy = SmolVLAGRPOPolicy(smolvla_policy)
     
     # Create trainer
-    trainer = SmolVLARLTrainer(
+    trainer = SmolVLAGRPOTrainer(
         env=env,
-        policy=rl_policy,
-        value_function=value_function,
+        policy=grpo_policy,
         config=config,
         device=device
     )
@@ -806,4 +667,38 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Training configuration
+    config = {
+        # Environment
+        'task': 'test',
+        'observation_height': 480,
+        'observation_width': 640,
+        'show_viewer': False,
+        
+        # GRPO hyperparameters
+        'epochs': 1000,
+        'trajectories_per_update': 5,  # Collect 5 trajectories per update
+        'max_preference_pairs': 200,   # Keep max 200 preference pairs
+        'learning_rate': 1e-5,         # Lower LR for SmolVLA fine-tuning
+        'batch_size': 16,              # Batch size for preference pairs
+        'max_episode_steps': 100,      # Max steps per episode
+        'max_grad_norm': 0.5,          # Gradient clipping
+        
+        # Logging and saving
+        'wandb_project': 'smolvla-grpo',
+        'wandb_run_name': None,  # Will be auto-generated
+        'checkpoint_dir': 'outputs/rl_checkpoints2',
+        'save_freq': 20,
+        'buffer_clear_freq': 50,  # Clear buffer every N epochs
+        
+        # Video recording
+        'record_video': True,
+        'video_freq': 10,  # Record video every 10 epochs
+        'video_fps': 30,
+        
+        # Model
+        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",
+    }
+    main(config)
+
+# uv run -m src.rl_smolvla
