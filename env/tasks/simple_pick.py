@@ -17,9 +17,8 @@ joints_name = (
 )
 AGENT_DIM = len(joints_name)
 
-class TestTask:
+class SimplePickTask:
     def __init__(self, observation_height, observation_width, show_viewer=False):
-        self.color = "red"
         self.show_viewer = show_viewer
         self.observation_height = observation_height
         self.observation_width = observation_width
@@ -52,32 +51,34 @@ class TestTask:
         # キューブAを追加
         self.cubeA = self.scene.add_entity(
             gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.65, 0.0, 0.025)),
-            surface=gs.surfaces.Aluminium(color=(0.7, 0.3, 0.3))
+            surface=gs.surfaces.Aluminium(color=(0.7, 0.3, 0.3)) # Red
         )
         # キューブBを追加
         self.cubeB = self.scene.add_entity(
             gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.35, 0.0, 0.025)),
-            surface=gs.surfaces.Aluminium(color=(0.3, 0.3, 0.7))
+            surface=gs.surfaces.Aluminium(color=(0.3, 0.3, 0.7)) # Blue
         )
-        # 箱を追加
-        self.box = self.scene.add_entity(gs.morphs.URDF(file="URDF/box/box.urdf", pos=(0.5, 0.0, 0.0), scale=self.box_scale))
+        # キューブCを追加
+        self.cubeC = self.scene.add_entity(
+            gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.5, 0.0, 0.025)),
+            surface=gs.surfaces.Aluminium(color=(0.3, 0.7, 0.3)) # Green
+        )
         # フロントカメラを追加
         self.front_cam = self.scene.add_camera(
             res=(self.observation_width, self.observation_height),
-            pos=(2.5, 0.0, 1.5),
+            pos=(2.0, 0.0, 1.5),
             lookat=(0.5, 0.0, 0.2),
-            fov=25, #18,
+            fov=25,
             GUI=False
         )
         # サイドカメラを追加
         self.side_cam = self.scene.add_camera(
             res=(self.observation_width, self.observation_height),
-            pos=(0.5, 1.5, 1.5),
+            pos=(0.5, 1.5, 0.5),
             lookat=(0.5, 0.0, 0.1),
-            fov=30, # 20,
+            fov=20,
             GUI=False
         )
-
         self.scene.build()
         self.motors_dof = np.arange(7)
         self.fingers_dof = np.arange(7, 9)
@@ -100,21 +101,13 @@ class TestTask:
         target.set_quat(quat_tensor)
     
     def reset(self):
-        # 箱を初期位置に設定
-        pos_tensor = torch.tensor([0.5, 0.0, 0.0], dtype=torch.float32, device=gs.device)
-        quat_tensor = torch.tensor([0, 0, 0, 1], dtype=torch.float32, device=gs.device)
-        self.box.set_pos(pos_tensor)
-        self.box.set_quat(quat_tensor)
+        self.color = random.choice(["red", "blue", "green"])
         # CubeAの位置をランダムに設定
-        self.set_random_state(self.cubeA, (0.3, 0.7), (-0.3, 0.3), 0.04) # 1回は必ず呼び出す
-        while self.compute_reward() == 1.0:
-            print("CubeA is in the box, resetting position...")
-            self.set_random_state(self.cubeA, (0.3, 0.7), (-0.3, 0.3), 0.04)
+        self.set_random_state(self.cubeA, (0.3, 0.7), (-0.3, 0.3), 0.04)
         # CubeBの位置をランダムに設定
         self.set_random_state(self.cubeB, (0.3, 0.7), (-0.3, 0.3), 0.04)
-        while self.compute_reward(target="cubeB") == 1.0:
-            print("CubeB is in the box, resetting position...")
-            self.set_random_state(self.cubeB, (0.3, 0.7), (-0.3, 0.3), 0.04)
+        # CubeCの位置をランダムに設定
+        self.set_random_state(self.cubeC, (0.3, 0.7), (-0.3, 0.3), 0.04)
         # フランカロボットを初期位置にリセット
         qpos = np.array([0.0, -0.4, 0.0, -2.2, 0.0, 2.0, 0.8, 0.04, 0.04])
         qpos_tensor = torch.tensor(qpos, dtype=torch.float32, device=gs.device)
@@ -158,26 +151,22 @@ class TestTask:
         info = {}
         return obs, reward, terminated, truncated, info
     
-    def compute_reward(self, target="cubeA"):
-        # CubeAがboxの中にあるかどうかをチェック
-        if target == "cubeA":
+    def compute_reward(self):
+        if self.color == "red":
             pos = self.cubeA.get_pos().cpu().numpy()
-        elif target == "cubeB":
+        elif self.color == "blue":
             pos = self.cubeB.get_pos().cpu().numpy()
-        box_pos = self.box.get_pos().cpu().numpy()
-        box_size = np.array([0.1, 0.1, 0.05])*self.box_scale  # Boxのサイズを取得
-        cube_in_box = (
-            (box_pos[0] - box_size[0] / 2 <= pos[0] <= box_pos[0] + box_size[0] / 2) and
-            (box_pos[1] - box_size[1] / 2 <= pos[1] <= box_pos[1] + box_size[1] / 2) and
-            (box_pos[2] <= pos[2] <= box_pos[2] + box_size[2])
-        )
-        reward = 1.0 if cube_in_box else 0.0
-        if not cube_in_box:
-            # CubeAとEnd Effectorの距離を計算
-            eef_pos = self.eef.get_pos().cpu().numpy()
-            distance = np.linalg.norm(eef_pos - pos)
-            # 距離に基づいて報酬
-            reward = 0.3 * np.exp(-distance)
+        elif self.color == "green":
+            pos = self.cubeC.get_pos().cpu().numpy()
+        else:
+            raise ValueError(f"Invalid color: {self.color}. Choose from 'red', 'blue', or 'green'.")
+        # posとself.effの距離に基づいて報酬を計算
+        eef_pos = self.eef.get_pos().cpu().numpy()
+        distance = np.linalg.norm(eef_pos - pos)
+        reward = 0.5 * np.exp(-distance)
+        # posの高さに基づいて報酬を計算
+        height = pos[2] - 0.025  # キューブの高さ
+        reward += 0.5 * (1 - np.exp(-height))
         return reward
 
     def get_obs(self):
@@ -209,7 +198,7 @@ class TestTask:
 if __name__ == "__main__":
     import cv2
     gs.init(backend=gs.cpu, precision="32")
-    task = TestTask(observation_height=480, observation_width=640, show_viewer=True)
+    task = SimplePickTask(observation_height=512, observation_width=512, show_viewer=True)
     task.reset()
     for _ in range(100):
         action = np.random.uniform(-1.0, 1.0, size=(AGENT_DIM,))

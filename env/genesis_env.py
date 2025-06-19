@@ -1,6 +1,7 @@
 import gymnasium as gym
 import warnings
 from env.tasks.test import TestTask
+from env.tasks.simple_pick import SimplePickTask
 
 class GenesisEnv(gym.Env):
 
@@ -74,6 +75,12 @@ class GenesisEnv(gym.Env):
     def _make_env_task(self, task_name):
         if task_name == "test":
             task = TestTask(
+                observation_height=self.observation_height,
+                observation_width=self.observation_width,
+                show_viewer=self.show_viewer,
+            )
+        elif task_name == "simple_pick":
+            task = SimplePickTask(
                 observation_height=self.observation_height,
                 observation_width=self.observation_width,
                 show_viewer=self.show_viewer,
