@@ -152,7 +152,7 @@ class SmolVLAWrapper:
                 past_key_values=None,
                 inputs_embeds=[prefix_embs, None],
                 use_cache=False,
-                fill_kv_cache=False,
+                fill_kv_cache=True,
             )
             
             # VLM出力から最終トークンの隠れ特徴量を抽出
@@ -256,22 +256,40 @@ class SmolVLAWrapper:
         """観測をSmolVLA用のバッチ形式に変換"""
         batch = {}
         
-        # 状態情報
+        # 状態情報 - agent_posを観測状態として使用
         if 'agent_pos' in obs:
-            agent_pos = torch.from_numpy(obs['agent_pos'].copy()).float().to(self.device)
+            agent_pos = obs['agent_pos']
+            if isinstance(agent_pos, np.ndarray):
+                agent_pos = torch.from_numpy(agent_pos.copy()).float()
+            else:
+                agent_pos = agent_pos.float()
+            
             if agent_pos.dim() == 1:
                 agent_pos = agent_pos.unsqueeze(0)
-            batch['observation.state'] = agent_pos
+            batch['observation.state'] = agent_pos.to(self.device)
         
-        # 画像情報
+        # 画像情報 - GenesisEnvの観測形式に合わせて処理
         for key in ['observation.images.front', 'observation.images.side']:
             if key in obs:
-                img = obs[key].copy()
-                img = torch.from_numpy(img).float() / 255.0
+                img = obs[key]
+                if isinstance(img, np.ndarray):
+                    # NumPy配列の場合
+                    img = torch.from_numpy(img.copy()).float()
+                else:
+                    # すでにTensorの場合
+                    img = img.float()
+                
+                # 正規化 (0-255 -> 0-1)
+                if img.max() > 1.0:
+                    img = img / 255.0
+                
+                # 次元の順序を調整: (H, W, C) -> (C, H, W)
                 if img.ndim == 3 and img.shape[2] in [1, 3, 4]:
                     img = img.permute(2, 0, 1)
                 elif img.ndim == 2:
                     img = img.unsqueeze(0)
+                
+                # バッチ次元を追加して保存
                 batch[key] = img.to(self.device).unsqueeze(0)
         
         # タスク記述
@@ -1383,10 +1401,10 @@ def main():
         'save_freq': 100,
         'eval_freq': 50,
         'deterministic_eval': False,
-        'checkpoint_dir': 'outputs/dsrl_checkpoints',
+        'checkpoint_dir': 'outputs/train/dsrl_checkpoints',
         
         # SmolVLA設定
-        'pretrained_model_path': None,  # 事前学習済みモデルのパス
+        'pretrained_model_path': "lerobot/smolvla_base",  # 事前学習済みモデルのパス
         'smolvla_config_overrides': {
             'chunk_size': 50,
             'max_action_dim': 7,  # Genesis環境のaction次元に合わせて調整
