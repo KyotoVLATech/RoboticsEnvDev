@@ -171,7 +171,7 @@ class SmolVLAWrapper:
             # 論文では複数カメラからの浅い畳み込みエンコーダを使用
             # ここではSmolVLAの画像エンコーダ特徴量を使用
             visual_features_list = []
-            for key in ['observation.images.front', 'observation.images.side']:
+            for key in ['observation.image', 'observation.image2']:
                 if key in batch:
                     # SmolVLAの画像エンコーダから特徴量を抽出
                     img_tensor = batch[key]  # (1, C, H, W)
@@ -275,10 +275,15 @@ class SmolVLAWrapper:
                 agent_pos = agent_pos.unsqueeze(0)
             batch['observation.state'] = agent_pos.to(self.device)
         
-        # 画像情報 - GenesisEnvの観測形式に合わせて処理
-        for key in ['observation.images.front', 'observation.images.side']:
-            if key in obs:
-                img = obs[key]
+        # 画像情報 - GenesisEnvの観測形式をSmolVLAの期待する形式にマッピング
+        image_mapping = {
+            'observation.images.front': 'observation.image',     # メインカメラ
+            'observation.images.side': 'observation.image2',     # サブカメラ
+        }
+        
+        for env_key, smolvla_key in image_mapping.items():
+            if env_key in obs:
+                img = obs[env_key]
                 if isinstance(img, np.ndarray):
                     # NumPy配列の場合
                     img = torch.from_numpy(img.copy()).float()
@@ -296,8 +301,8 @@ class SmolVLAWrapper:
                 elif img.ndim == 2:
                     img = img.unsqueeze(0)
                 
-                # バッチ次元を追加して保存
-                batch[key] = img.to(self.device).unsqueeze(0)
+                # バッチ次元を追加してSmolVLAの期待するキーで保存
+                batch[smolvla_key] = img.to(self.device).unsqueeze(0)
         
         # タスク記述
         batch['task'] = task_description.get(task, task)
