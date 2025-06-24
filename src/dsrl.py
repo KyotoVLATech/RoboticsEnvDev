@@ -85,9 +85,9 @@ class SmolVLAWrapper:
         # 2. VLM最終トークン特徴量の次元（論文では2048次元）
         self.vlm_final_token_dim = self.vlm_hidden_size
         
-        # 3. 視覚特徴量の次元（簡易実装：画像チャンネル数 * カメラ数）
-        # 論文では浅い畳み込みエンコーダを使用するが、ここでは簡易的に設定
-        self.visual_features_dim = 3 * 2  # RGB * 2カメラ（front, side）
+        # 3. 視覚特徴量の次元（SmolVLAの実際の画像エンコーダー出力次元に基づく）
+        # embed_imageメソッドから実際の次元を取得
+        self.visual_features_dim = self._get_visual_features_dim()
         
         # 総合的な状態特徴量の次元
         self.total_state_dim = (
@@ -95,15 +95,43 @@ class SmolVLAWrapper:
             self.vlm_final_token_dim + 
             self.visual_features_dim
         )
+    
+    def _get_visual_features_dim(self) -> int:
+        """
+        SmolVLAの画像エンコーダーから実際の視覚特徴量次元を取得
         
-        logging.info(f"SmolVLAWrapper initialized:")
-        logging.info(f"  chunk_size={self.chunk_size}")
-        logging.info(f"  noise_dim={self.noise_dim}")
-        logging.info(f"  vlm_hidden_size={self.vlm_hidden_size}")
-        logging.info(f"  proprioceptive_dim={self.proprioceptive_dim}")
-        logging.info(f"  vlm_final_token_dim={self.vlm_final_token_dim}")
-        logging.info(f"  visual_features_dim={self.visual_features_dim}")
-        logging.info(f"  total_state_dim={self.total_state_dim}")
+        Returns:
+            int: 視覚特徴量の次元（複数カメラ分を考慮）
+        """
+        try:
+            # ダミー画像を作成してembed_imageメソッドで実際の出力次元を確認
+            dummy_img = torch.randn(1, 3, 224, 224, device=self.device)
+            
+            # SmolVLAの正規化処理を適用
+            dummy_img = dummy_img * 2.0 - 1.0
+            
+            with torch.no_grad():
+                # embed_imageで実際の特徴量を取得
+                img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(dummy_img)
+                
+                # 特徴量の次元を取得
+                if img_features.dim() == 3:  # (batch, seq_len, hidden_dim)
+                    single_cam_dim = img_features.shape[-1]
+                elif img_features.dim() == 4:  # (batch, height, width, hidden_dim)
+                    single_cam_dim = img_features.shape[-1]
+                else:
+                    single_cam_dim = img_features.shape[-1]
+                
+                # 2カメラ分の次元（front, side）
+                total_visual_dim = single_cam_dim * 2
+                
+                logging.info(f"Detected visual feature dimensions: {single_cam_dim} per camera, {total_visual_dim} total")
+                return total_visual_dim
+                
+        except Exception as e:
+            logging.warning(f"Failed to detect visual feature dimensions: {e}. Using fallback value.")
+            # フォールバック：SmolVLAの隠れ状態次元を使用
+            return self.vlm_hidden_size
     
     def extract_state_features(self, obs: Dict, task: str) -> torch.Tensor:
         """
@@ -167,19 +195,36 @@ class SmolVLAWrapper:
             batch_indices = torch.arange(prefix_hidden_states.shape[0], device=prefix_hidden_states.device)
             final_token_features = prefix_hidden_states[batch_indices, last_valid_indices]  # (batch_size, hidden_dim)
             
-            # 3. 視覚特徴量の取得（論文に基づく簡易実装）
-            # 論文では複数カメラからの浅い畳み込みエンコーダを使用
-            # ここではSmolVLAの画像エンコーダ特徴量を使用
+            # 3. 視覚特徴量の取得（SmolVLAの実装に基づく）
+            # SmolVLAのembed_imageメソッドを使用して豊富な視覚特徴量を取得
             visual_features_list = []
-            for key in ['observation.image', 'observation.image2']:
+            image_keys = ['observation.images.front', 'observation.images.side']
+            
+            for key in image_keys:
                 if key in batch:
-                    # SmolVLAの画像エンコーダから特徴量を抽出
                     img_tensor = batch[key]  # (1, C, H, W)
-                    # 簡易的にGlobal Average Poolingで特徴量を取得
-                    img_features = F.adaptive_avg_pool2d(img_tensor, (1, 1)).flatten(1)  # (1, C)
+                    
+                    # SmolVLAの画像エンコーダーを使用して特徴量を抽出
+                    # prepare_imagesと同様の前処理を適用
+                    img_processed = img_tensor.clone()
+                    
+                    # SmolVLAの正規化: [0,1] -> [-1,1] (SigLIP用)
+                    if img_processed.max() <= 1.0:
+                        img_processed = img_processed * 2.0 - 1.0
+                    
+                    # SmolVLAのembed_imageメソッドを使用
+                    img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(img_processed)
+                    
+                    # 画像特徴量の次元を削減（Global Average Pooling）
+                    if img_features.dim() == 3:  # (batch, seq_len, hidden_dim)
+                        img_features = img_features.mean(dim=1)  # (batch, hidden_dim)
+                    elif img_features.dim() == 4:  # (batch, height, width, hidden_dim)
+                        img_features = img_features.mean(dim=(1, 2))  # (batch, hidden_dim)
+                    
                     visual_features_list.append(img_features)
             
             if visual_features_list:
+                # 複数画像の特徴量を結合
                 visual_features = torch.cat(visual_features_list, dim=-1)  # 複数画像を結合
             else:
                 # 画像がない場合はゼロベクトル
@@ -276,9 +321,10 @@ class SmolVLAWrapper:
             batch['observation.state'] = agent_pos.to(self.device)
         
         # 画像情報 - GenesisEnvの観測形式をSmolVLAの期待する形式にマッピング
+        # キーマッピングを修正：環境のキー -> SmolVLAの期待するキー
         image_mapping = {
-            'observation.images.front': 'observation.image',     # メインカメラ
-            'observation.images.side': 'observation.image2',     # サブカメラ
+            'observation.images.front': 'observation.images.front',
+            'observation.images.side': 'observation.images.side',
         }
         
         for env_key, smolvla_key in image_mapping.items():
@@ -1363,10 +1409,16 @@ def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optio
     config_overrides = config_overrides or {}
     
     try:
-        # 1. 直接SmolVLAPolicyをロード（コンフィグの`type`フィールド問題を回避）
-        policy = SmolVLAPolicy.from_pretrained(model_path)
+        # lerobot/common/policies/factory.pyの実装を参考にした読み込み
+        from lerobot.common.policies.factory import get_policy_class
         
-        # 2. コンフィグをオーバーライド
+        # SmolVLAPolicyクラスを取得
+        policy_cls = get_policy_class("smolvla")
+        
+        # 事前学習済みモデルを読み込み
+        policy = policy_cls.from_pretrained(model_path)
+        
+        # コンフィグをオーバーライド
         for key, value in config_overrides.items():
             setattr(policy.config, key, value)
         
@@ -1374,32 +1426,8 @@ def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optio
     
     except Exception as e:
         logging.warning(f"Could not load pre-trained model from '{model_path}'. Error: {e}. Creating a new one.")
-        # デフォルト設定でモデルを作成
-        config = SmolVLAConfig()
-        
-        # デフォルトの画像特徴量を設定
-        from lerobot.configs.types import FeatureType, PolicyFeature
-        config.input_features = {
-            'observation.state': PolicyFeature(type=FeatureType.STATE, shape=(32,)),
-            'observation.images.front': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
-            'observation.images.side': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
-        }
-        config.output_features = {
-            'action': PolicyFeature(type=FeatureType.ACTION, shape=(7,))
-        }
-        
-        if config_overrides:
-            for key, value in config_overrides.items():
-                setattr(config, key, value)
-        
-        # データセット統計を初期化（正規化のため）
-        dataset_stats = {
-            'observation.state': {'min': torch.zeros(32), 'max': torch.ones(32), 'mean': torch.zeros(32), 'std': torch.ones(32)},
-            'action': {'min': torch.zeros(7), 'max': torch.ones(7), 'mean': torch.zeros(7), 'std': torch.ones(7)}
-        }
-        
-        policy = SmolVLAPolicy(config, dataset_stats=dataset_stats)
-        logging.info("Created SmolVLA model with default configuration and overrides.")
+        # プログラム終了
+        exit(1)
 
     return policy
 
@@ -1444,10 +1472,10 @@ def main():
         'checkpoint_dir': 'outputs/train/dsrl_checkpoints',
         
         # SmolVLA設定
-        'pretrained_model_path': "lerobot/smolvla_base",  # 事前学習済みモデルのパス
+        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",  # 事前学習済みモデルのパス
         'smolvla_config_overrides': {
-            'chunk_size': 50,
-            'max_action_dim': 7,  # smolvla_baseのデフォルトに合わせる
+            # 'chunk_size': 50,
+            # 'max_action_dim': 9,  # smolvla_baseのデフォルトに合わせる
         }
     }
     
