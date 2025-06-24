@@ -15,6 +15,7 @@ import sys
 import time
 import logging
 import math
+import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any
@@ -25,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from huggingface_hub import hf_hub_download
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -240,8 +242,13 @@ class SmolVLAWrapper:
             )
             
             # 元のaction次元に切り取り
-            original_action_dim = self.smolvla_policy.config.action_feature.shape[0]
-            actions = actions[:, :, :original_action_dim]
+            if hasattr(self.smolvla_policy.config, 'output_features') and 'action' in self.smolvla_policy.config.output_features:
+                original_action_dim = self.smolvla_policy.config.output_features['action'].shape[0]
+                actions = actions[:, :, :original_action_dim]
+            else:
+                # デフォルトのアクション次元を使用
+                original_action_dim = min(self.max_action_dim, actions.shape[-1])
+                actions = actions[:, :, :original_action_dim]
             
             # 正規化を解除
             actions = self.smolvla_policy.unnormalize_outputs({"action": actions})["action"]
@@ -1342,25 +1349,53 @@ def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optio
     SmolVLAモデルを読み込み
     
     Args:
-        model_path: 事前学習済みモデルのパス（Noneの場合はデフォルト設定）
+        model_path: 事前学習済みモデルのパスまたはHubリポジトリ名
         config_overrides: 設定のオーバーライド
     
     Returns:
         SmolVLAPolicy: SmolVLAポリシー
     """
-    if model_path and Path(model_path).exists():
-        # 事前学習済みモデルを読み込み
+    config_overrides = config_overrides or {}
+    
+    try:
+        # 1. 直接SmolVLAPolicyをロード（コンフィグの`type`フィールド問題を回避）
         policy = SmolVLAPolicy.from_pretrained(model_path)
-        logging.info(f"Loaded pre-trained SmolVLA model from {model_path}")
-    else:
+        
+        # 2. コンフィグをオーバーライド
+        for key, value in config_overrides.items():
+            setattr(policy.config, key, value)
+        
+        logging.info(f"Loaded SmolVLA model from {model_path} with overrides.")
+    
+    except Exception as e:
+        logging.warning(f"Could not load pre-trained model from '{model_path}'. Error: {e}. Creating a new one.")
         # デフォルト設定でモデルを作成
         config = SmolVLAConfig()
+        
+        # デフォルトの画像特徴量を設定
+        from lerobot.configs.types import FeatureType, PolicyFeature
+        config.input_features = {
+            'observation.state': PolicyFeature(type=FeatureType.STATE, shape=(32,)),
+            'observation.images.front': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
+            'observation.images.side': PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
+        }
+        config.output_features = {
+            'action': PolicyFeature(type=FeatureType.ACTION, shape=(7,))
+        }
+        
         if config_overrides:
             for key, value in config_overrides.items():
                 setattr(config, key, value)
-        policy = SmolVLAPolicy(config)
-        logging.info("Created SmolVLA model with default configuration")
-    
+        
+        # データセット統計を初期化（正規化のため）
+        dataset_stats = {
+            'observation.state': {'min': torch.zeros(32), 'max': torch.ones(32), 'mean': torch.zeros(32), 'std': torch.ones(32)},
+            'action': {'min': torch.zeros(7), 'max': torch.ones(7), 'mean': torch.zeros(7), 'std': torch.ones(7)}
+        }
+        
+        policy = SmolVLAPolicy(config, dataset_stats=dataset_stats)
+        logging.info("Created SmolVLA model with default configuration and overrides.")
+
     return policy
 
 def main():
@@ -1407,23 +1442,61 @@ def main():
         'pretrained_model_path': "lerobot/smolvla_base",  # 事前学習済みモデルのパス
         'smolvla_config_overrides': {
             'chunk_size': 50,
-            'max_action_dim': 7,  # Genesis環境のaction次元に合わせて調整
+            'max_action_dim': 7,  # smolvla_baseのデフォルトに合わせる
         }
     }
     
-    # コマンドライン引数の処理（簡易版）
-    import sys
-    for i, arg in enumerate(sys.argv):
-        if arg == '--algorithm' and i + 1 < len(sys.argv):
-            config['algorithm'] = sys.argv[i + 1]
-        elif arg == '--task' and i + 1 < len(sys.argv):
-            config['task'] = sys.argv[i + 1]
-        elif arg == '--episodes' and i + 1 < len(sys.argv):
-            config['total_episodes'] = int(sys.argv[i + 1])
-        elif arg == '--pretrained' and i + 1 < len(sys.argv):
-            config['pretrained_model_path'] = sys.argv[i + 1]
-        elif arg == '--no-wandb':
-            config['use_wandb'] = False
+    # コマンドライン引数の処理
+    import argparse
+    parser = argparse.ArgumentParser(description="Train or evaluate a DSRL agent on SmolVLA.")
+    parser.add_argument('--eval', action='store_true', help='Run in evaluation mode.')
+    parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to the agent checkpoint for evaluation (e.g., outputs/train/dsrl_checkpoints/episode_2000/dsrl_agent.pth).')
+    parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes for evaluation.')
+    
+    # Allow overriding config values from command line
+    parser.add_argument('--task', type=str, default=config['task'], help=f"Task to run. Default: {config['task']}")
+    parser.add_argument('--algorithm', type=str, default=config['algorithm'], help=f"DSRL algorithm ('NA' or 'SAC'). Default: {config['algorithm']}")
+    parser.add_argument('--total_episodes', type=int, default=config['total_episodes'], help=f"Total episodes for training. Default: {config['total_episodes']}")
+    parser.add_argument('--pretrained_model_path', type=str, default=config['pretrained_model_path'], help=f"Path to pretrained SmolVLA. Default: {config['pretrained_model_path']}")
+    parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging.')
+    parser.add_argument('--show_viewer', action='store_true', help='Show environment viewer during training.')
+
+    args = parser.parse_args()
+
+    # Update config with command line arguments
+    config['task'] = args.task
+    config['algorithm'] = args.algorithm
+    config['total_episodes'] = args.total_episodes
+    config['pretrained_model_path'] = args.pretrained_model_path
+    if args.no_wandb: config['use_wandb'] = False
+    if args.show_viewer: config['show_viewer'] = True
+
+    if args.eval:
+        if not args.checkpoint_path:
+            parser.error("--checkpoint_path is required for evaluation.")
+        
+        # In eval mode, try to load config from the checkpoint for consistency
+        eval_config = config.copy()
+        try:
+            ckpt = torch.load(args.checkpoint_path, map_location='cpu')
+            if 'config' in ckpt:
+                # Overwrite the base config with the one from the checkpoint
+                # This ensures that model parameters (hidden_dim, etc.) match
+                eval_config = ckpt['config']
+                # But allow command-line overrides for things we might want to change at eval time
+                eval_config['task'] = args.task # Use task from command line
+            else:
+                print("Warning: No config found in checkpoint. Using default config.")
+
+        except FileNotFoundError:
+            print(f"Error: Checkpoint file not found at {args.checkpoint_path}")
+            return
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            return
+
+        evaluate_dsrl_model(args.checkpoint_path, eval_config, num_episodes=args.num_episodes)
+        return
     
     # デバイス設定
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1453,7 +1526,7 @@ def main():
     # 次元設定（論文に基づく修正）
     state_dim = smolvla_wrapper.total_state_dim  # 論文に基づく総合状態特徴量次元
     noise_dim = smolvla_wrapper.noise_dim
-    action_dim = config['smolvla_config_overrides']['max_action_dim']
+    action_dim = smolvla_wrapper.max_action_dim
     
     logging.info(f"Dimensions - state: {state_dim}, noise: {noise_dim}, action: {action_dim}")
     logging.info(f"State composition:")
@@ -1515,7 +1588,7 @@ def evaluate_dsrl_model(checkpoint_path: str, config: Dict, num_episodes: int = 
     # DSRLエージェントの作成と読み込み（論文に基づく修正）
     state_dim = smolvla_wrapper.total_state_dim  # 論文に基づく総合状態特徴量次元
     noise_dim = smolvla_wrapper.noise_dim
-    action_dim = config['smolvla_config_overrides']['max_action_dim']
+    action_dim = smolvla_wrapper.max_action_dim
     
     dsrl_agent = create_dsrl_agent(
         config['algorithm'], state_dim, noise_dim, action_dim, config, device
