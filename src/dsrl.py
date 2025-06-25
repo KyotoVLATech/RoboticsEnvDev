@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+import imageio
 from huggingface_hub import hf_hub_download
 
 # Add parent directory to path for imports
@@ -133,7 +134,7 @@ class SmolVLAWrapper:
             # フォールバック：SmolVLAの隠れ状態次元を使用
             return self.vlm_hidden_size
     
-    def extract_state_features(self, obs: Dict, task: str) -> torch.Tensor:
+    def extract_state_features(self, obs: Dict, task_desc: str) -> torch.Tensor:
         """
         論文に基づく状態特徴量の抽出
         
@@ -148,12 +149,13 @@ class SmolVLAWrapper:
         Args:
             obs: 環境からの観測
             task: タスク記述
+            env: 環境のインスタンス（動的なタスク記述生成用）
         
         Returns:
             torch.Tensor: 論文に基づく状態特徴量
         """
         with torch.no_grad():
-            batch = self._prepare_batch(obs, task)
+            batch = self._prepare_batch(obs, task_desc)
             
             # 1. 自己受容状態（proprioceptive state）の取得
             proprioceptive_state = self.smolvla_policy.prepare_state(batch)  # (1, state_dim)
@@ -253,7 +255,7 @@ class SmolVLAWrapper:
     
     def generate_actions_from_noise(self, state_features: torch.Tensor, 
                                   latent_noise: torch.Tensor, 
-                                  obs: Dict, task: str) -> torch.Tensor:
+                                  obs: Dict, task_desc: str) -> torch.Tensor:
         """
         潜在ノイズから行動チャンクを生成
         
@@ -262,12 +264,13 @@ class SmolVLAWrapper:
             latent_noise: 潜在ノイズ（単一ステップ）
             obs: 元の観測（画像等の再構築用）
             task: タスク記述
+            env: 環境のインスタンス（動的なタスク記述生成用）
         
         Returns:
             torch.Tensor: 生成された行動チャンク
         """
         with torch.no_grad():
-            batch = self._prepare_batch(obs, task)
+            batch = self._prepare_batch(obs, task_desc)
             
             # 画像とlanguageの準備
             images, img_masks = self.smolvla_policy.prepare_images(batch)
@@ -304,7 +307,7 @@ class SmolVLAWrapper:
             
             return actions.squeeze(0)  # バッチ次元を除去
     
-    def _prepare_batch(self, obs: Dict, task: str) -> Dict[str, torch.Tensor]:
+    def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         """観測をSmolVLA用のバッチ形式に変換"""
         batch = {}
         
@@ -349,9 +352,7 @@ class SmolVLAWrapper:
                 
                 # バッチ次元を追加してSmolVLAの期待するキーで保存
                 batch[smolvla_key] = img.to(self.device).unsqueeze(0)
-        
-        # タスク記述
-        batch['task'] = task_description.get(task, task)
+        batch['task'] = task_desc
         
         return batch
 
@@ -597,7 +598,7 @@ class DSRLNA(DSRLAgent):
         self.action_dim = action_dim
         
         # SmolVLAWrapperへの参照（ノイズエイリアシングで使用）
-        self.smolvla_wrapper = None  # DSRLTrainerで設定される
+        self.smolvla_wrapper = None
         
         # ネットワークの初期化
         hidden_dim = config.get('hidden_dim', 1024)
@@ -791,7 +792,7 @@ class DSRLNA(DSRLAgent):
         self.a_critic_optimizer.step()
         
         return a_critic_loss.item()
-    
+
     def _update_w_critic(self, batch: Dict[str, Any]) -> float:
         """Latent-Noise Critic（潜在ノイズ空間Q関数）の更新 - ノイズエイリアシング"""
         obs_list = batch['obs']
@@ -1185,6 +1186,9 @@ class DSRLTrainer:
         self.total_rewards = []
         self.success_rates = []
         
+        # 動画記録用
+        self.video_frames = []
+        
         # ログ設定
         self.logger = logging.getLogger(__name__)
         
@@ -1230,6 +1234,10 @@ class DSRLTrainer:
                         'replay_buffer_size': len(self.replay_buffer)
                     })
             
+            # 評価と動画記録
+            if episode % self.config.get('eval_freq', 50) == 0:
+                self._run_evaluation(episode)
+            
             # 学習の実行
             if len(self.replay_buffer) >= self.config.get('min_replay_size', 1000):
                 for _ in range(self.config.get('updates_per_episode', 1)):
@@ -1248,6 +1256,15 @@ class DSRLTrainer:
     def _run_episode(self) -> Tuple[float, int, bool]:
         """1エピソードを実行"""
         obs, info = self.env.reset()
+        if self.config['task'] in task_description:
+            task_desc = task_description[self.config['task']]
+        elif self.config['task'] == 'simple_pick':
+            try:
+                task_desc = f"Pick up a {self.env._env.color} cube."
+            except AttributeError:
+                task_desc = "Pick up a cube."
+        else:
+            task_desc = self.config['task']
         done = False
         episode_reward = 0.0
         episode_length = 0
@@ -1260,8 +1277,8 @@ class DSRLTrainer:
         
         while not done and episode_length < self.config.get('max_episode_length', 500):
             # 現在の状態特徴量を抽出
-            current_state_features = self.smolvla_wrapper.extract_state_features(obs, self.config['task'])
-            
+            current_state_features = self.smolvla_wrapper.extract_state_features(obs, task_desc)
+
             # DSRLエージェントで潜在ノイズを選択
             deterministic = self.config.get('deterministic_eval', False) and \
                           self.episode_count % self.config.get('eval_freq', 50) == 0
@@ -1269,7 +1286,7 @@ class DSRLTrainer:
             
             # SmolVLAで行動チャンクを生成
             action_chunk = self.smolvla_wrapper.generate_actions_from_noise(
-                current_state_features, latent_noise, obs, self.config['task']
+                current_state_features, latent_noise, obs, task_desc
             )
             
             # Action chunkを逐次実行
@@ -1295,6 +1312,7 @@ class DSRLTrainer:
                 
                 done = terminated or truncated
                 if done:
+                    obs = next_obs  # 最終観測を更新
                     break
                 
                 obs = next_obs
@@ -1371,6 +1389,168 @@ class DSRLTrainer:
         torch.save(stats, stats_path)
         
         self.logger.info(f"Checkpoint saved to {checkpoint_dir}")
+    
+    def _run_evaluation(self, episode: int) -> None:
+        """評価エピソードを実行し、動画を記録"""
+        self.logger.info(f"Running evaluation at episode {episode}")
+        
+        # 動画記録フラグを有効にする
+        record_video = self.config.get('record_video', True)
+        video_freq = self.config.get('video_freq', 10)
+        should_record = record_video and episode % video_freq == 0
+        
+        # 動画フレームをリセット
+        if should_record:
+            self.video_frames = []
+        
+        # 評価エピソードを実行
+        eval_rewards = []
+        eval_successes = []
+        num_eval_episodes = self.config.get('num_eval_episodes', 3)
+        
+        for eval_ep in range(num_eval_episodes):
+            episode_reward, episode_length, success, frames = self._run_single_evaluation_episode(should_record)
+            eval_rewards.append(episode_reward)
+            eval_successes.append(float(success))
+            
+            # 最初の評価エピソードの動画フレームを記録
+            if should_record and eval_ep == 0 and frames:
+                self.video_frames.extend(frames)
+        
+        # 評価結果をログ
+        avg_eval_reward = np.mean(eval_rewards)
+        avg_eval_success = np.mean(eval_successes)
+        
+        self.logger.info(
+            f"Evaluation at episode {episode}: "
+            f"avg_reward={avg_eval_reward:.3f}, avg_success={avg_eval_success:.3f}"
+        )
+        
+        # WandBにログ
+        if self.config.get('use_wandb', True):
+            wandb.log({
+                'eval/avg_reward': avg_eval_reward,
+                'eval/avg_success': avg_eval_success,
+                'eval/episode': episode
+            })
+        
+        # 動画をWandBにアップロード
+        if should_record and self.video_frames:
+            self._upload_video(episode)
+    
+    def _run_single_evaluation_episode(self, record_video: bool = False) -> Tuple[float, int, bool, Optional[List]]:
+        """単一の評価エピソードを実行"""
+        obs, info = self.env.reset()
+        if self.config['task'] in task_description:
+            task_desc = task_description[self.config['task']]
+        elif self.config['task'] == 'simple_pick':
+            try:
+                task_desc = f"Pick up a {self.env._env.color} cube."
+            except AttributeError:
+                task_desc = "Pick up a cube."
+        else:
+            task_desc = self.config['task']
+        done = False
+        episode_reward = 0.0
+        episode_length = 0
+        frames = [] if record_video else None
+        
+        while not done and episode_length < self.config.get('max_episode_length', 500):
+            # 状態特徴量を抽出
+            state_features = self.smolvla_wrapper.extract_state_features(obs, task_desc)
+            # 決定論的にノイズを選択（評価時）
+            latent_noise = self.dsrl_agent.select_noise(state_features, deterministic=True)
+            # SmolVLAで行動チャンクを生成
+            action_chunk = self.smolvla_wrapper.generate_actions_from_noise(
+                state_features, latent_noise, obs, task_desc
+            )
+            # Action chunkを逐次実行
+            for action_idx in range(min(self.config.get('chunk_size', 50), len(action_chunk))):
+                # 各ステップで動画フレームを記録
+                if record_video:
+                    frame = self._render_frame(obs)
+                    if frame is not None:
+                        frames.append(frame)
+                
+                action = action_chunk[action_idx]
+                if isinstance(action, torch.Tensor):
+                    action = action.cpu().numpy()
+                obs, reward, terminated, truncated, info = self.env.step(action)
+                episode_reward += reward
+                episode_length += 1
+                
+                # 終了条件をチェック
+                done = terminated or truncated
+                if done:
+                    break
+            
+            # アクションチャンク実行後も終了条件をチェック
+            if done:
+                break
+        
+        success = info.get('is_success', False)
+        return episode_reward, episode_length, success, frames
+    
+    def _render_frame(self, obs: Dict) -> Optional[np.ndarray]:
+        """観測から動画フレームをレンダリング"""
+        try:
+            frames = []
+            image_keys = ['observation.images.front', 'observation.images.side']
+            
+            for key in image_keys:
+                if key in obs:
+                    img = obs[key]
+                    if isinstance(img, torch.Tensor):
+                        img = img.cpu().numpy()
+                    if isinstance(img, np.ndarray):
+                        img = img.copy()
+                    
+                    # 画像の次元を調整
+                    if img.ndim == 3 and img.shape[0] == 3:
+                        img = np.transpose(img, (1, 2, 0))  # (C, H, W) -> (H, W, C)
+                    
+                    # 値の範囲を[0,255]に正規化
+                    if img.max() <= 1.0:
+                        img = (img * 255).astype(np.uint8)
+                    else:
+                        img = img.astype(np.uint8)
+                    
+                    frames.append(img)
+            
+            if frames:
+                # 複数の画像を横に結合
+                combined = np.concatenate(frames, axis=1)
+                return combined
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to render frame: {e}")
+        
+        return None
+    
+    def _upload_video(self, episode: int) -> None:
+        """動画をWandBにアップロード"""
+        try:
+            if not self.video_frames:
+                return
+            
+            # フレームを(T, H, W, C)形式に変換
+            video_array = np.stack(self.video_frames, axis=0)  # (T, H, W, C)
+            
+            # 値の範囲を[0, 255]に正規化し、uint8に変換
+            if video_array.max() <= 1.0:
+                video_array = (video_array * 255).astype(np.uint8)
+            else:
+                video_array = video_array.astype(np.uint8)
+            # THWC -> TCHW
+            video_array = np.transpose(video_array, (0, 3, 1, 2))
+            wandb.log({
+                f"eval_video/video": wandb.Video(video_array, fps=30, format="mp4")
+            })
+            
+            self.logger.info(f"Uploaded evaluation video for episode {episode}")
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to upload video: {e}")
 
 def create_dsrl_agent(algorithm: str, state_dim: int, noise_dim: int, action_dim: int, 
                      config: Dict, device: str = "cuda") -> DSRLAgent:
@@ -1449,14 +1629,14 @@ def main():
         'chunk_size': 50,
         
         # ネットワーク設定
-        'hidden_dim': 1024,
-        'learning_rate': 3e-4,
-        'gamma': 0.99,
+        'hidden_dim': 128,
+        'learning_rate': 0.0003,
+        'gamma': 0.999,
         'tau': 0.005,
         'target_update_freq': 2,
         
         # 学習設定
-        'batch_size': 64,
+        'batch_size': 256,
         'replay_buffer_size': 100000,
         'min_replay_size': 1000,
         'updates_per_episode': 1,
@@ -1466,16 +1646,20 @@ def main():
         'wandb_project': 'dsrl-smolvla',
         'wandb_run_name': None,  # Noneの場合は自動生成
         'log_freq': 10,
-        'save_freq': 100,
+        'save_freq': 50,
         'eval_freq': 50,
         'deterministic_eval': False,
         'checkpoint_dir': 'outputs/train/dsrl_checkpoints',
         
+        # 動画記録設定
+        'record_video': True,
+        'video_freq': 50,  # 動画記録頻度（エピソード毎）
+        'num_eval_episodes': 1,  # 評価時のエピソード数
+        
         # SmolVLA設定
         'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",  # 事前学習済みモデルのパス
         'smolvla_config_overrides': {
-            # 'chunk_size': 50,
-            # 'max_action_dim': 9,  # smolvla_baseのデフォルトに合わせる
+            'n_action_steps': 20,
         }
     }
     
@@ -1634,20 +1818,29 @@ def evaluate_dsrl_model(checkpoint_path: str, config: Dict, num_episodes: int = 
     
     for episode in range(num_episodes):
         obs, info = env.reset()
+        if config['task'] in task_description:
+            task_desc = task_description[config['task']]
+        elif config['task'] == 'simple_pick':
+            try:
+                task_desc = f"Pick up a {env._env.color} cube."
+            except AttributeError:
+                task_desc = "Pick up a cube."
+        else:
+            task_desc = config['task']
         done = False
         episode_reward = 0.0
         episode_length = 0
         
         while not done and episode_length < config.get('max_episode_length', 500):
             # 状態特徴量を抽出
-            state_features = smolvla_wrapper.extract_state_features(obs, config['task'])
-            
+            state_features = smolvla_wrapper.extract_state_features(obs, task_desc)
+
             # 決定論的にノイズを選択
             latent_noise = dsrl_agent.select_noise(state_features, deterministic=True)
             
             # 行動チャンクを生成
             action_chunk = smolvla_wrapper.generate_actions_from_noise(
-                state_features, latent_noise, obs, config['task']
+                state_features, latent_noise, obs, task_desc
             )
             
             # Action chunkを実行

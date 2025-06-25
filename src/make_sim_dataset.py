@@ -89,11 +89,11 @@ def main(task, task_description, stage_dict, observation_height=480, observation
     ep = 0
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
-        if ep % 10 == 0:
-            # メモリリークを避けるために、10エピソードごとに環境をリセット
-            if env is not None:
-                env.close()
-            env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
+        # if ep % 10 == 0:
+        #     # メモリリークを避けるために、10エピソードごとに環境をリセット
+        #     if env is not None:
+        #         env.close()
+        #     env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
         env.reset()
         states, images_front, images_side, actions = [], [], [], []
         save_flag = False
