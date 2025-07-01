@@ -101,8 +101,9 @@ uv run -m lerobot.scripts.train \
     --job_name=smolvla_${DATASET_NAME} \
     --policy.device=cuda \
     --wandb.enable=true \
-    --batch_size=8 \
-    --steps=50000
+    --wandb.disable_artifact=true \
+    --batch_size=64 \
+    --steps=250000
 ```
 学習後の`config.json`の`n_action_steps`が1になっているので編集して50にする
 ## ポリシーの評価

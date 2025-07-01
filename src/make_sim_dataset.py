@@ -84,16 +84,11 @@ def initialize_dataset(task, height, width):
     return lerobot_dataset
 
 def main(task, task_description, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
-    env = None
+    env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
     dataset = initialize_dataset(task, observation_height, observation_width)
     ep = 0
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
-        # if ep % 10 == 0:
-        #     # メモリリークを避けるために、10エピソードごとに環境をリセット
-        #     if env is not None:
-        #         env.close()
-        #     env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
         env.reset()
         states, images_front, images_side, actions = [], [], [], []
         save_flag = False
@@ -118,7 +113,7 @@ def main(task, task_description, stage_dict, observation_height=480, observation
                 print(f"Episode reward: {episode_reward}, failed.")
                 save_flag = False
         # デバッグ用
-        env.save_video(file_name=f"video", fps=30)
+        # env.save_video(file_name=f"video", fps=30)
 
         if not save_flag:
             print(f"🚫 Skipping episode {ep+1}")
@@ -152,7 +147,6 @@ def main(task, task_description, stage_dict, observation_height=480, observation
 
 if __name__ == "__main__":
     task = "simple_pick" # [test, simple_pick]
-    state_dict = None
     if task == "test":
         stage_dict = { # 350
             "hover": 100, # cubeの上に手を持っていく
