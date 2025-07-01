@@ -22,7 +22,7 @@ class GenesisEnv(gym.Env):
         self.observation_width = observation_width
         self.show_viewer = show_viewer
         self.render_mode = render_mode
-        self._env = self._make_env_task(self.task)
+        self._env = self._make_env_task()
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
         self._max_episode_steps = 500
@@ -87,20 +87,28 @@ class GenesisEnv(gym.Env):
         else:
             warnings.warn("front observation is not enabled, cannot render.")
             return None
+    
+    def get_task_description(self):
+        if self.task == "test":
+            return "Pick up a red cube and place it in a box."
+        elif self.task == "simple_pick":
+            return f"Pick up a {self._env.color} cube."
+        else:
+            raise NotImplementedError(f"Task {self.task} is not implemented.")
 
-    def _make_env_task(self, task_name):
-        if task_name == "test":
+    def _make_env_task(self):
+        if self.task == "test":
             task = TestTask(
                 observation_height=self.observation_height,
                 observation_width=self.observation_width,
                 show_viewer=self.show_viewer,
             )
-        elif task_name == "simple_pick":
+        elif self.task == "simple_pick":
             task = SimplePickTask(
                 observation_height=self.observation_height,
                 observation_width=self.observation_width,
                 show_viewer=self.show_viewer,
             )
         else:
-            raise NotImplementedError(task_name)
+            raise NotImplementedError(f"Task {self.task} is not implemented.")
         return task

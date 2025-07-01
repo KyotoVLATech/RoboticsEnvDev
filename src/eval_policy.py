@@ -14,7 +14,6 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.genesis_env import GenesisEnv
-from src.make_sim_dataset import task_description
 
 def process_image_for_video(image_array, target_height, target_width):
     """Process an image array for video recording, ensuring it's HWC, RGB, uint8."""
@@ -153,7 +152,7 @@ def main(training_name, observation_height, observation_width, episode_num, show
                     observation[key] = tensor_img.to(device).unsqueeze(0)
                 else:
                     print(f"Warning: Unsupported input feature '{key}'. Skipping.")
-            observation["task"] = task_description[task_name]
+            observation["task"] = env.get_task_description()
             with torch.inference_mode():
                 action = policy.select_action(observation)
                 if isinstance(action, dict):

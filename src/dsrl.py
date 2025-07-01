@@ -26,7 +26,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env.genesis_env import GenesisEnv
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from src.make_sim_dataset import task_description
 from src.dsrl_agent import DSRLAgent, DSRLNA, DSRLSAC, DSRLExperience
 
 class SmolVLAWrapper:
@@ -452,15 +451,7 @@ class DSRLTrainer:
     def _run_episode(self) -> Tuple[float, int, bool]:
         """1エピソードを実行"""
         obs, info = self.env.reset()
-        if self.config['task'] in task_description:
-            task_desc = task_description[self.config['task']]
-        elif self.config['task'] == 'simple_pick':
-            try:
-                task_desc = f"Pick up a {self.env._env.color} cube."
-            except AttributeError:
-                task_desc = "Pick up a cube."
-        else:
-            task_desc = self.config['task']
+        task_desc = self.env.get_task_description()
         done = False
         episode_reward = 0.0
         episode_length = 0
@@ -637,15 +628,7 @@ class DSRLTrainer:
     def _run_single_evaluation_episode(self, record_video: bool = False) -> Tuple[float, int, bool, Optional[List]]:
         """単一の評価エピソードを実行"""
         obs, info = self.env.reset()
-        if self.config['task'] in task_description:
-            task_desc = task_description[self.config['task']]
-        elif self.config['task'] == 'simple_pick':
-            try:
-                task_desc = f"Pick up a {self.env._env.color} cube."
-            except AttributeError:
-                task_desc = "Pick up a cube."
-        else:
-            task_desc = self.config['task']
+        task_desc = self.env.get_task_description()
         done = False
         episode_reward = 0.0
         episode_length = 0
@@ -1014,15 +997,7 @@ def evaluate_dsrl_model(checkpoint_path: str, config: Dict, num_episodes: int = 
     
     for episode in range(num_episodes):
         obs, info = env.reset()
-        if config['task'] in task_description:
-            task_desc = task_description[config['task']]
-        elif config['task'] == 'simple_pick':
-            try:
-                task_desc = f"Pick up a {env._env.color} cube."
-            except AttributeError:
-                task_desc = "Pick up a cube."
-        else:
-            task_desc = config['task']
+        task_desc = env.get_task_description()
         done = False
         episode_reward = 0.0
         episode_length = 0

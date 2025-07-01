@@ -1,26 +1,14 @@
-"""PPO training for SmolVLA policy."""
-
-import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-import sys
-import time
-import logging
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
-import imageio
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from env.genesis_env import GenesisEnv
+import torch
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from src.make_sim_dataset import task_description
+import numpy as np
+import wandb
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+import logging
+from env.genesis_env import GenesisEnv
+from pathlib import Path
 
 @dataclass
 class ActionSequence:
@@ -123,7 +111,7 @@ class SmolVLAPolicyWrapper(nn.Module):
         
         return log_prob
     
-    def _prepare_batch(self, obs: Dict, task: str) -> Dict[str, torch.Tensor]:
+    def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         batch = {}
         device = next(self.parameters()).device
         
@@ -143,7 +131,7 @@ class SmolVLAPolicyWrapper(nn.Module):
                     img = img.unsqueeze(0)
                 batch[key] = img.to(device).unsqueeze(0)
         
-        batch['task'] = task_description.get(task, task)
+        batch['task'] = task_desc
         return batch
 
 class PPOTrainer:
@@ -159,10 +147,16 @@ class PPOTrainer:
             hidden_dim=config.get('value_hidden_dim', 256)
         ).to(device)
         
-        # オプティマイザー
-        self.policy_optimizer = torch.optim.Adam(
-            self.policy.parameters(), 
+        # オプティマイザー（分離型）
+        # PPO用のlog_stdのみを学習
+        self.ppo_optimizer = torch.optim.Adam(
+            [self.policy.log_std], 
             lr=config['policy_lr']
+        )
+        # SmolVLA全体を低い学習率で学習
+        self.smolvla_optimizer = torch.optim.Adam(
+            self.policy.smolvla_policy.parameters(),
+            lr=config.get('smolvla_lr', 1e-6)
         )
         self.value_optimizer = torch.optim.Adam(
             self.value_network.parameters(), 
@@ -178,6 +172,10 @@ class PPOTrainer:
         self.value_stable_threshold = config.get('value_stable_threshold', 0.01)
         self.value_stable_window = config.get('value_stable_window', 10)
         self.value_update_epochs = config.get('value_update_epochs', 5)
+        
+        # SmolVLA学習制御用の変数
+        self.smolvla_warmup_epochs = config.get('smolvla_warmup_epochs', 50)
+        self.flow_matching_coef = config.get('flow_matching_coef', 0.1)
         
         wandb.init(
             project=config.get('wandb_project', 'smolvla-ppo'),
@@ -215,7 +213,7 @@ class PPOTrainer:
             obs_copy = {k: v.copy() if hasattr(v, 'copy') else v for k, v in obs.items()}
             
             # 1つのaction chunkを生成（確率的サンプリング）
-            batch = self.policy._prepare_batch(obs, self.config['task'])
+            batch = self.policy._prepare_batch(obs, self.env.get_task_description())
             action_chunk = self.policy.sample_action(batch, deterministic=False)
             
             if isinstance(action_chunk, torch.Tensor):
@@ -251,7 +249,7 @@ class PPOTrainer:
                 action=action_chunk,  # 全action chunk
                 reward=chunk_total_reward,  # chunk全体の累積報酬
                 value=value,
-                task=task_description.get(self.config['task'], self.config['task'])
+                task=self.env.get_task_description()
             )
             sequences.append(action_seq)
             
@@ -371,10 +369,50 @@ class PPOTrainer:
         
         return avg_value_loss
     
-    def update_policy(self, sequences: List[ActionSequence], advantages: np.ndarray) -> Dict:
-        """改善されたPPOポリシー更新"""
+    def compute_flow_matching_loss(self, sequences: List[ActionSequence]) -> torch.Tensor:
+        """SmolVLAのFlow Matching損失を計算"""
         if not sequences:
-            return {'policy_loss': 0.0, 'num_sequences': 0}
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        num_valid = 0
+        
+        for seq in sequences:
+            try:
+                # バッチを準備
+                batch = self.policy._prepare_batch(seq.observation, seq.task)
+                
+                # アクションをテンソル形式に変換
+                action_tensor = torch.from_numpy(seq.action).float().to(self.device)
+                if action_tensor.dim() == 1:
+                    action_tensor = action_tensor.unsqueeze(0)
+                
+                # Flow Matching損失を計算
+                loss, _ = self.policy.smolvla_policy.forward(
+                    {**batch, 'action': action_tensor}
+                )
+                
+                total_loss = total_loss + loss
+                num_valid += 1
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to compute flow matching loss: {e}")
+                continue
+        
+        if num_valid > 0:
+            return total_loss / num_valid
+        else:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+    
+    def should_update_smolvla(self, epoch: int) -> bool:
+        """SmolVLAの更新タイミングを制御"""
+        return (self.is_value_function_stable() and 
+                epoch >= self.smolvla_warmup_epochs)
+    
+    def update_policy_hybrid(self, sequences: List[ActionSequence], advantages: np.ndarray, epoch: int) -> Dict:
+        """PPO損失とFlow Matching損失を組み合わせたハイブリッド学習"""
+        if not sequences:
+            return {'policy_loss': 0.0, 'flow_matching_loss': 0.0, 'num_sequences': 0}
         
         # アドバンテージの正規化
         if len(advantages) > 1:
@@ -392,7 +430,6 @@ class PPOTrainer:
                 old_log_probs.append(log_prob.detach())
             except Exception as e:
                 self.logger.warning(f"Failed to compute old log prob: {e}")
-                # デフォルト値を使用
                 old_log_probs.append(torch.tensor(-10.0, device=self.device))
         
         old_log_probs_tensor = torch.stack(old_log_probs)
@@ -400,88 +437,124 @@ class PPOTrainer:
         total_policy_loss = 0.0
         total_entropy_loss = 0.0
         total_kl_div = 0.0
+        total_flow_matching_loss = 0.0
         
         for ppo_epoch in range(self.config.get('ppo_epochs', 4)):
-            # 新しいlog probを計算
-            new_log_probs = []
-            entropies = []
+            # PPO更新 (log_stdのみ)
+            ppo_loss, entropy_loss, kl_div = self._update_ppo_only(
+                sequences, advantages_tensor, old_log_probs_tensor
+            )
             
-            for seq in sequences:
-                try:
-                    log_prob = self.policy.compute_action_logprob(
-                        seq.observation, seq.action, seq.task
-                    )
-                    new_log_probs.append(log_prob)
-                    
-                    # エントロピー計算（探索促進のため）
-                    std = torch.exp(self.policy.log_std)
-                    entropy = 0.5 * (std.log() + np.log(2 * np.pi * np.e)).sum()
-                    entropies.append(entropy)
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to compute new log prob: {e}")
-                    new_log_probs.append(torch.tensor(-10.0, device=self.device, requires_grad=True))
-                    entropies.append(torch.tensor(0.0, device=self.device, requires_grad=True))
+            total_policy_loss += ppo_loss
+            total_entropy_loss += entropy_loss
+            total_kl_div += kl_div
             
-            new_log_probs_tensor = torch.stack(new_log_probs)
-            entropy_tensor = torch.stack(entropies)
-            
-            # 重要度サンプリング比
-            ratio = torch.exp(new_log_probs_tensor - old_log_probs_tensor)
-            
-            # KLダイバージェンス（早期停止のため）
-            kl_div = (old_log_probs_tensor - new_log_probs_tensor).mean()
-            
-            # PPO loss
-            surr1 = ratio * advantages_tensor
-            surr2 = torch.clamp(
-                ratio, 
-                1.0 - self.config['clip_epsilon'], 
-                1.0 + self.config['clip_epsilon']
-            ) * advantages_tensor
-            
-            policy_loss = -torch.min(surr1, surr2).mean()
-            
-            # エントロピーボーナス
-            entropy_loss = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
-            
-            # 総合loss
-            total_loss = policy_loss + entropy_loss
-            
-            # ポリシーの更新
-            self.policy_optimizer.zero_grad()
-            total_loss.backward()
-            
-            if self.config.get('max_grad_norm', 0) > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), 
-                    self.config['max_grad_norm']
-                )
-            
-            self.policy_optimizer.step()
-            
-            total_policy_loss += policy_loss.item()
-            total_entropy_loss += entropy_loss.item()
-            total_kl_div += kl_div.item()
+            # SmolVLA更新 (warmup後のみ)
+            if self.should_update_smolvla(epoch):
+                flow_matching_loss = self._update_smolvla_only(sequences)
+                total_flow_matching_loss += flow_matching_loss
             
             # KLダイバージェンスが大きすぎる場合は早期停止
-            if kl_div.item() > self.config.get('target_kl', 0.02):
-                self.logger.info(f"Early stopping at PPO epoch {ppo_epoch} due to high KL divergence: {kl_div.item():.4f}")
+            if kl_div > self.config.get('target_kl', 0.02):
+                self.logger.info(f"Early stopping at PPO epoch {ppo_epoch} due to high KL divergence: {kl_div:.4f}")
                 break
         
-        avg_policy_loss = total_policy_loss / (ppo_epoch + 1)
-        avg_entropy_loss = total_entropy_loss / (ppo_epoch + 1)
-        avg_kl_div = total_kl_div / (ppo_epoch + 1)
+        num_epochs = ppo_epoch + 1
+        avg_policy_loss = total_policy_loss / num_epochs
+        avg_entropy_loss = total_entropy_loss / num_epochs
+        avg_kl_div = total_kl_div / num_epochs
+        avg_flow_matching_loss = total_flow_matching_loss / num_epochs if total_flow_matching_loss > 0 else 0.0
         
         return {
             'policy_loss': avg_policy_loss,
             'entropy_loss': avg_entropy_loss,
+            'flow_matching_loss': avg_flow_matching_loss,
             'kl_divergence': avg_kl_div,
             'num_sequences': len(sequences),
             'avg_reward': np.mean([seq.reward for seq in sequences]),
             'avg_advantage': np.mean(advantages),
-            'std_mean': torch.exp(self.policy.log_std).mean().item()
+            'std_mean': torch.exp(self.policy.log_std).mean().item(),
+            'smolvla_updated': self.should_update_smolvla(epoch)
         }
+    
+    def _update_ppo_only(self, sequences: List[ActionSequence], advantages_tensor: torch.Tensor, 
+                        old_log_probs_tensor: torch.Tensor) -> Tuple[float, float, float]:
+        """PPOの部分のみを更新（log_stdパラメータのみ）"""
+        # 新しいlog probを計算
+        new_log_probs = []
+        entropies = []
+        
+        for seq in sequences:
+            try:
+                log_prob = self.policy.compute_action_logprob(
+                    seq.observation, seq.action, seq.task
+                )
+                new_log_probs.append(log_prob)
+                
+                # エントロピー計算
+                std = torch.exp(self.policy.log_std)
+                entropy = 0.5 * (std.log() + np.log(2 * np.pi * np.e)).sum()
+                entropies.append(entropy)
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to compute new log prob: {e}")
+                new_log_probs.append(torch.tensor(-10.0, device=self.device, requires_grad=True))
+                entropies.append(torch.tensor(0.0, device=self.device, requires_grad=True))
+        
+        new_log_probs_tensor = torch.stack(new_log_probs)
+        entropy_tensor = torch.stack(entropies)
+        
+        # 重要度サンプリング比
+        ratio = torch.exp(new_log_probs_tensor - old_log_probs_tensor)
+        
+        # KLダイバージェンス
+        kl_div = (old_log_probs_tensor - new_log_probs_tensor).mean()
+        
+        # PPO loss
+        surr1 = ratio * advantages_tensor
+        surr2 = torch.clamp(
+            ratio, 
+            1.0 - self.config['clip_epsilon'], 
+            1.0 + self.config['clip_epsilon']
+        ) * advantages_tensor
+        
+        policy_loss = -torch.min(surr1, surr2).mean()
+        entropy_loss = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
+        
+        # PPOのみの更新（log_stdのみ）
+        total_loss = policy_loss + entropy_loss
+        
+        self.ppo_optimizer.zero_grad()
+        total_loss.backward()
+        
+        if self.config.get('max_grad_norm', 0) > 0:
+            torch.nn.utils.clip_grad_norm_([self.policy.log_std], self.config['max_grad_norm'])
+        
+        self.ppo_optimizer.step()
+        
+        return policy_loss.item(), entropy_loss.item(), kl_div.item()
+    
+    def _update_smolvla_only(self, sequences: List[ActionSequence]) -> float:
+        """SmolVLAの部分のみを更新（Flow Matching損失）"""
+        flow_matching_loss = self.compute_flow_matching_loss(sequences)
+        
+        if flow_matching_loss.item() > 0:
+            self.smolvla_optimizer.zero_grad()
+            flow_matching_loss.backward()
+            
+            if self.config.get('max_grad_norm', 0) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.smolvla_policy.parameters(), 
+                    self.config['max_grad_norm']
+                )
+            
+            self.smolvla_optimizer.step()
+        
+        return flow_matching_loss.item()
+
+    def update_policy(self, sequences: List[ActionSequence], advantages: np.ndarray) -> Dict:
+        """レガシー互換性のため維持、内部でハイブリッド学習を呼び出し"""
+        return self.update_policy_hybrid(sequences, advantages, self.epoch)
     
     def train(self):
         self.logger.info(f"Starting PPO training for {self.config['epochs']} epochs")
@@ -527,7 +600,9 @@ class PPOTrainer:
                 log_dict.update({
                     'entropy_loss': policy_update_info['entropy_loss'],
                     'kl_divergence': policy_update_info['kl_divergence'],
-                    'std_mean': policy_update_info['std_mean']
+                    'std_mean': policy_update_info['std_mean'],
+                    'flow_matching_loss': policy_update_info.get('flow_matching_loss', 0.0),
+                    'smolvla_updated': policy_update_info.get('smolvla_updated', False)
                 })
             
             wandb.log(log_dict)
@@ -578,70 +653,3 @@ class PPOTrainer:
         smolvla_path = checkpoint_dir / "smolvla_policy"
         self.policy.smolvla_policy.save_pretrained(smolvla_path)
         wandb.save(str(policy_path))
-
-def main(config):
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    
-    Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
-    
-    env = GenesisEnv(
-        task=config['task'],
-        observation_height=config['observation_height'],
-        observation_width=config['observation_width'],
-        show_viewer=config['show_viewer']
-    )
-    
-    if config['pretrained_model_path']:
-        smolvla_policy = SmolVLAPolicy.from_pretrained(config['pretrained_model_path'])
-        smolvla_policy.config.n_action_steps = config['n_action_steps']
-    else:
-        smolvla_config = SmolVLAConfig()
-        smolvla_config.n_action_steps = config['n_action_steps']
-        smolvla_policy = SmolVLAPolicy(smolvla_config)
-    
-    # action_dimをconfigから取得、またはデフォルト値を使用
-    action_dim = smolvla_policy.config.output_features.action.shape[0]
-    config['state_dim'] = smolvla_policy.config.input_features.state.shape[0]
-    
-    policy = SmolVLAPolicyWrapper(smolvla_policy, action_dim, config.get('initial_std', 0.1))
-    trainer = PPOTrainer(env, policy, config, device)
-    trainer.train()
-    env.close()
-
-if __name__ == "__main__":
-    config = {
-        'task': 'simple_pick',
-        'observation_height': 512,
-        'observation_width': 512,
-        'show_viewer': False,
-        'epochs': 1000,
-        'batch_size': 8,  # 並行して実行するエピソード数
-        'policy_lr': 1e-5,
-        'value_lr': 1e-4,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_epsilon': 0.2,
-        'ppo_epochs': 4,
-        'max_episode_steps': 500,
-        'max_grad_norm': 0.5,
-        'wandb_project': 'smolvla-ppo',
-        'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/rl_checkpoints_ppo',
-        'save_freq': 50,
-        'record_video': True,
-        'video_freq': 10,
-        'video_fps': 30,
-        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",
-        'n_action_steps': 20,
-        'initial_std': 0.1,  # 初期標準偏差
-        'entropy_coef': 0.01,  # エントロピー係数
-        'target_kl': 0.02,  # KLダイバージェンスの閾値
-        'value_hidden_dim': 256,
-        'value_stable_threshold': 0.01,  # 価値関数の安定性判定閾値
-        'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
-        'value_update_epochs': 5,        # 価値関数の更新エポック数
-    }
-    main(config)

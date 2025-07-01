@@ -83,7 +83,7 @@ def initialize_dataset(task, height, width):
     )
     return lerobot_dataset
 
-def main(task, task_description, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
+def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
     env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
     dataset = initialize_dataset(task, observation_height, observation_width)
     ep = 0
@@ -128,11 +128,6 @@ def main(task, task_description, stage_dict, observation_height=480, observation
             image_side = images_side[i]
             if isinstance(image_side, Image.Image):
                 image_side = np.array(image_side)
-            task_desc = None
-            if task in task_description:
-                task_desc = task_description[task]
-            elif task == "simple_pick":
-                task_desc = f"Pick up a {env._env.color} cube."
             dataset.add_frame(
                 {
                     "observation.state": states[i].astype(np.float32),
@@ -140,7 +135,7 @@ def main(task, task_description, stage_dict, observation_height=480, observation
                     "observation.images.front": image_front,
                     "observation.images.side": image_side,
                 },
-                task=task_desc,
+                task=env.get_task_description(),
             )
         dataset.save_episode()
     env.close()
@@ -164,4 +159,4 @@ if __name__ == "__main__":
             "grasp": 20, # cubeを掴む
             "lift": 50, # cubeを持ち上げる
         }
-    main(task, task_description, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=100, show_viewer=False)
+    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=100, show_viewer=False)
