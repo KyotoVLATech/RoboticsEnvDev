@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.common.constants import ACTION
 import numpy as np
 import wandb
 from typing import Dict, List, Tuple, Optional
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 import logging
 from env.genesis_env import GenesisEnv
 from pathlib import Path
+import cv2
 
 @dataclass
 class ActionSequence:
@@ -113,7 +115,7 @@ class SmolVLAPolicyWrapper(nn.Module):
     
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         batch = {}
-        device = next(self.parameters()).device
+        device = self.log_std.device
         
         if 'agent_pos' in obs:
             agent_pos = torch.from_numpy(obs['agent_pos'].copy()).float().to(device)
@@ -192,7 +194,7 @@ class PPOTrainer:
             sequences = self._collect_episode_sequences()
             if sequences:
                 all_sequences.extend(sequences)
-                self.logger.info(f"Episode {episode_idx + 1}: collected {len(sequences)} sequences")
+                # self.logger.info(f"Episode {episode_idx + 1}: collected {len(sequences)} sequences")
         
         return all_sequences
     
@@ -200,64 +202,53 @@ class PPOTrainer:
         """1エピソードを実行してaction chunkを収集（1 chunk = 1 PPO action）"""
         self.policy.smolvla_policy.reset()
         obs = self.env.reset()
+        task_desc = self.env.get_task_description()
         if isinstance(obs, tuple):
             obs, _ = obs
         
         sequences = []
         done = False
-        chunk_count = 0
-        max_chunks = self.config.get('max_episode_steps', 100)
+        step_count = 0
+        max_steps = self.config.get('max_episode_steps', 100)
         n_action_steps = self.config['n_action_steps']
         
-        while not done and chunk_count < max_chunks:
+        while not done and step_count < max_steps:
             obs_copy = {k: v.copy() if hasattr(v, 'copy') else v for k, v in obs.items()}
-            
+            # action chunk全体を実行して報酬を累積
+            chunk_total_reward = 0.0
+            action_chunk = []
             # 1つのaction chunkを生成（確率的サンプリング）
             batch = self.policy._prepare_batch(obs, self.env.get_task_description())
-            action_chunk = self.policy.sample_action(batch, deterministic=False)
-            
-            if isinstance(action_chunk, torch.Tensor):
-                action_chunk = action_chunk.cpu().numpy()
-            
+            for _ in range(n_action_steps):
+                action = self.policy.sample_action(batch, deterministic=False)[0]
+                if isinstance(action, torch.Tensor):
+                    action = action.cpu().numpy()
+                action_chunk.append(action)
+                obs, reward, done, truncated, info = self.env.step(action)
+                # Record video frame
+                if self.config.get('record_video', False) and self.epoch % self.config.get('video_freq', 10) == 0:
+                    frame = self._render_frame(obs, task_desc)
+                    if frame is not None:
+                        self.video_frames.append(frame)
+                chunk_total_reward += reward
+                step_count += 1
+                if done or truncated:
+                    break
             # 価値関数による状態価値推定
             state_tensor = self._extract_state_tensor(obs)
             with torch.no_grad():
                 value = self.value_network(state_tensor).item()
-            
-            # Record video frame
-            if self.config.get('record_video', False) and self.epoch % self.config.get('video_freq', 10) == 0:
-                frame = self._render_frame(obs)
-                if frame is not None:
-                    self.video_frames.append(frame)
-            
-            # action chunk全体を実行して報酬を累積
-            chunk_total_reward = 0.0
-            chunk_step_count = 0
-            
-            for action_idx in range(min(n_action_steps, len(action_chunk))):
-                single_action = action_chunk[action_idx]
-                obs, reward, done, truncated, info = self.env.step(single_action)
-                chunk_total_reward += reward
-                chunk_step_count += 1
-                
-                if done or truncated:
-                    break
-            
             # ActionSequence作成（1 chunk = 1 action）
             action_seq = ActionSequence(
                 observation=obs_copy,
-                action=action_chunk,  # 全action chunk
+                action=np.array(action_chunk),  # n_action_steps分のアクション
                 reward=chunk_total_reward,  # chunk全体の累積報酬
                 value=value,
-                task=self.env.get_task_description()
+                task=task_desc
             )
             sequences.append(action_seq)
-            
-            chunk_count += 1
-            
             if done:
                 break
-        
         return sequences
     
     def _extract_state_tensor(self, obs: Dict) -> torch.Tensor:
@@ -271,7 +262,7 @@ class PPOTrainer:
             # デフォルト状態
             return torch.zeros(1, self.config.get('state_dim', 7)).to(self.device)
     
-    def _render_frame(self, obs: Dict) -> Optional[np.ndarray]:
+    def _render_frame(self, obs: Dict, task_desc=None) -> Optional[np.ndarray]:
         try:
             frames = []
             for key in ['observation.images.front', 'observation.images.side']:
@@ -289,6 +280,12 @@ class PPOTrainer:
                 combined = np.concatenate(frames, axis=1)
                 if combined.max() <= 1.0:
                     combined = (combined * 255).astype(np.uint8)
+                if task_desc:
+                    # cv2.putText(combined, task_desc, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    # 文字を左下に配置
+                    cv2.putText(combined, task_desc, (10, combined.shape[0] - 20), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, 
+                                (255, 255, 255), 2)
                 return combined
         except Exception as e:
             self.logger.warning(f"Failed to render frame: {e}")
@@ -384,12 +381,32 @@ class PPOTrainer:
                 
                 # アクションをテンソル形式に変換
                 action_tensor = torch.from_numpy(seq.action).float().to(self.device)
-                if action_tensor.dim() == 1:
-                    action_tensor = action_tensor.unsqueeze(0)
                 
-                # Flow Matching損失を計算
+                # 正しい形状に調整: [batch_size, sequence_length, action_dim]
+                if action_tensor.dim() == 2:  # [n_action_steps, action_dim]
+                    action_tensor = action_tensor.unsqueeze(0)  # [1, n_action_steps, action_dim]
+                elif action_tensor.dim() == 1:  # [action_dim]
+                    action_tensor = action_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, action_dim]
+                
+                # アクションをmax_action_dimにパディング
+                max_action_dim = self.policy.smolvla_policy.config.max_action_dim
+                current_action_dim = action_tensor.shape[-1]
+                
+                if current_action_dim < max_action_dim:
+                    # パディングを追加
+                    pad_size = max_action_dim - current_action_dim
+                    padding = torch.zeros(
+                        action_tensor.shape[0], action_tensor.shape[1], pad_size,
+                        dtype=action_tensor.dtype, device=action_tensor.device
+                    )
+                    action_tensor = torch.cat([action_tensor, padding], dim=-1)
+                elif current_action_dim > max_action_dim:
+                    # 切り捨て
+                    action_tensor = action_tensor[:, :, :max_action_dim]
+                
+                # Flow Matching損失を計算 - 正しいACTION定数を使用
                 loss, _ = self.policy.smolvla_policy.forward(
-                    {**batch, 'action': action_tensor}
+                    {**batch, ACTION: action_tensor}
                 )
                 
                 total_loss = total_loss + loss
@@ -619,17 +636,29 @@ class PPOTrainer:
                 self.save_checkpoint(epoch)
         
         wandb.finish()
-    
-    def _upload_video(self, epoch: int):
+
+    def _upload_video(self, episode: int) -> None:
+        """動画をWandBにアップロード"""
         try:
-            video_array = np.array(self.video_frames)
+            if not self.video_frames:
+                return
+            
+            # フレームを(T, H, W, C)形式に変換
+            video_array = np.stack(self.video_frames, axis=0)  # (T, H, W, C)
+            
+            # 値の範囲を[0, 255]に正規化し、uint8に変換
+            if video_array.max() <= 1.0:
+                video_array = (video_array * 255).astype(np.uint8)
+            else:
+                video_array = video_array.astype(np.uint8)
+            # THWC -> TCHW
+            video_array = np.transpose(video_array, (0, 3, 1, 2))
             wandb.log({
-                f"video_epoch_{epoch}": wandb.Video(
-                    video_array, 
-                    fps=self.config.get('video_fps', 30), 
-                    format="mp4"
-                )
+                f"videos/video": wandb.Video(video_array, fps=30, format="mp4")
             })
+            
+            self.logger.info(f"Uploaded evaluation video for episode {episode}")
+            
         except Exception as e:
             self.logger.warning(f"Failed to upload video: {e}")
     
@@ -641,7 +670,8 @@ class PPOTrainer:
             'epoch': epoch,
             'policy_state_dict': self.policy.state_dict(),
             'value_network_state_dict': self.value_network.state_dict(),
-            'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
+            'ppo_optimizer_state_dict': self.ppo_optimizer.state_dict(),
+            'smolvla_optimizer_state_dict': self.smolvla_optimizer.state_dict(),
             'value_optimizer_state_dict': self.value_optimizer.state_dict(),
             'value_loss_history': self.value_loss_history,
             'config': self.config

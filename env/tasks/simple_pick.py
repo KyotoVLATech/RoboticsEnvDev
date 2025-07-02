@@ -31,7 +31,7 @@ class SimplePickTask:
     def _build_scene(self, show_viewer):
         if not gs._initialized:
             print("Genesis is not initialized, initializing now...")
-            gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="WARNING")
+            gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="ERROR")
         # シーンを初期化
         self.scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(

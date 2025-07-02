@@ -39,8 +39,8 @@ def main(config):
         smolvla_policy = SmolVLAPolicy(smolvla_config)
     
     # action_dimをconfigから取得、またはデフォルト値を使用
-    action_dim = smolvla_policy.config.output_features.action.shape[0]
-    config['state_dim'] = smolvla_policy.config.input_features.state.shape[0]
+    action_dim = smolvla_policy.config.output_features["action"].shape[0]
+    config['state_dim'] = smolvla_policy.config.input_features["observation.state"].shape[0]
     
     policy = SmolVLAPolicyWrapper(smolvla_policy, action_dim, config.get('initial_std', 0.1))
     trainer = PPOTrainer(env, policy, config, device)
@@ -53,22 +53,22 @@ if __name__ == "__main__":
         'observation_height': 512,
         'observation_width': 512,
         'show_viewer': False,
-        'epochs': 1000,
-        'batch_size': 8,  # 並行して実行するエピソード数
+        'epochs': 1000, # 学習エポック数
+        'batch_size': 1,  # 8 1epochに実行するエピソード数
         'policy_lr': 1e-5,
         'value_lr': 1e-4,
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
-        'ppo_epochs': 4,
-        'max_episode_steps': 500,
+        'ppo_epochs': 4, # 1回の更新でPPOの学習を何エポック行うか
+        'max_episode_steps': 300,
         'max_grad_norm': 0.5,
         'wandb_project': 'smolvla',
         'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/rl_checkpoints_ppo',
+        'checkpoint_dir': 'outputs/train/smolvla_ppo',
         'save_freq': 50,
         'record_video': True,
-        'video_freq': 10,
+        'video_freq': 10, # 10 動画を記録する頻度
         'video_fps': 30,
         'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
         'n_action_steps': 10,
@@ -76,13 +76,13 @@ if __name__ == "__main__":
         'entropy_coef': 0.01,  # エントロピー係数
         'target_kl': 0.02,  # KLダイバージェンスの閾値
         'value_hidden_dim': 256,
-        'value_stable_threshold': 0.01,  # 価値関数の安定性判定閾値
-        'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
-        'value_update_epochs': 5,        # 価値関数の更新エポック数
+        'value_stable_threshold': 100.0,  # 0.1 価値関数の安定性判定閾値
+        'value_stable_window': 2,       # 10 安定性判定のためのウィンドウサイズ
+        'value_update_epochs': 5, # 価値関数の更新エポック数
         
         # ハイブリッド学習用の新しいパラメータ
         'smolvla_lr': 1e-6,              # SmolVLA用の学習率（PPOより低く設定）
-        'smolvla_warmup_epochs': 50,     # SmolVLA学習開始までのエポック数
+        'smolvla_warmup_epochs': 1,     # 50 SmolVLA学習開始までのエポック数
         'flow_matching_coef': 0.1,       # Flow Matching損失の係数
     }
     main(config)
