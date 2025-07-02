@@ -56,7 +56,7 @@ if __name__ == "__main__":
         'epochs': 1000, # 学習エポック数
         'batch_size': 4,  # 8 1epochに実行するエピソード数
         'policy_lr': 1e-5,
-        'value_lr': 1e-4,
+        'value_lr': 1e-5,
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
@@ -76,13 +76,14 @@ if __name__ == "__main__":
         'entropy_coef': 0.01,  # エントロピー係数
         'target_kl': 0.02,  # KLダイバージェンスの閾値
         'value_hidden_dim': 256,
-        'value_stable_threshold': 1.0,  # 0.1 価値関数の安定性判定閾値
+        'use_image_value_network': True,  # 画像特徴量を使った価値関数を使用
+        'value_stable_threshold': 1.0,  # 価値関数の安定性判定閾値（正規化後の報酬に合わせて調整）
         'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
         'value_update_epochs': 4, # 価値関数の更新エポック数
         
         # ハイブリッド学習用の新しいパラメータ
         'smolvla_lr': 1e-6,              # SmolVLA用の学習率（PPOより低く設定）
-        'smolvla_warmup_epochs': 50,     # SmolVLA学習開始までのエポック数
+        'smolvla_warmup_epochs': 10,     # 50 SmolVLA学習開始までのエポック数
         'flow_matching_coef': 0.1,       # Flow Matching損失の係数
     }
     main(config)

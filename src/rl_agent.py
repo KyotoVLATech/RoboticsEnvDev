@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+import torch.distributions as dist
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.common.constants import ACTION
 import numpy as np
@@ -36,6 +37,95 @@ class ValueNetwork(nn.Module):
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.network(state).squeeze(-1)
+
+class ImageValueNetwork(nn.Module):
+    """画像特徴量を使った価値関数ネットワーク"""
+    def __init__(self, smolvla_policy: SmolVLAPolicy, hidden_dim: int = 256):
+        super().__init__()
+        self.smolvla_policy = smolvla_policy
+        
+        # SmolVLAのビジョンエンコーダーの実際の出力次元を動的に取得
+        self._vision_feature_dim = None
+        self.hidden_dim = hidden_dim
+        
+        # 価値関数のヘッドは遅延初期化
+        self.value_head = None
+    
+    def forward(self, obs_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """観測から価値を予測"""
+        with torch.no_grad():
+            # SmolVLAのビジョンエンコーダーを使って特徴量を抽出
+            vision_features = self._extract_vision_features(obs_batch)
+        
+        # 価値関数のヘッドを遅延初期化
+        if self.value_head is None:
+            self._vision_feature_dim = vision_features.shape[-1]
+            self.value_head = nn.Sequential(
+                nn.Linear(self._vision_feature_dim, self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.ReLU(), 
+                nn.Linear(self.hidden_dim, 1)
+            ).to(vision_features.device)
+        
+        value = self.value_head(vision_features)
+        return value.squeeze(-1)
+    
+    def _extract_vision_features(self, obs_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """SmolVLAのビジョンエンコーダーから特徴量を抽出"""
+        # 画像を取得
+        images = []
+        img_masks = []
+        
+        for key in ['observation.images.front', 'observation.images.side']:
+            if key in obs_batch:
+                img = obs_batch[key]
+                if img.dim() == 4:  # [B, C, H, W]
+                    images.append(img)
+                    batch_size = img.shape[0]
+                    device = img.device
+                    img_masks.append(torch.ones(batch_size, dtype=torch.bool, device=device))
+        
+        if not images:
+            # デフォルトの特徴量を返す（float32型で）
+            # 次元は実際のビジョン特徴量と同じにする必要があるため、
+            # 一度実際の画像で次元を確認してから設定する
+            batch_size = obs_batch[list(obs_batch.keys())[0]].shape[0]
+            device = obs_batch[list(obs_batch.keys())[0]].device
+            # デフォルトは960次元（SmolVLAの実際の出力次元）
+            default_dim = getattr(self, '_vision_feature_dim', 960)
+            return torch.zeros(batch_size, default_dim, dtype=torch.float32, device=device)
+        
+        # SmolVLAのビジョンエンコーダーを使用して特徴量を抽出
+        # VLMWithExpertモデルのembed_imageメソッドを使用
+        all_features = []
+        for img in images:
+            # 画像を[-1, 1]の範囲に正規化（SmolVLAの要求に合わせる）
+            if img.max() <= 1.0:
+                img = img * 2.0 - 1.0
+            
+            # 画像をエンベッド
+            img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(img)
+            
+            # データ型をfloat32に変換
+            img_features = img_features.float()
+            
+            # グローバル平均プールを適用して固定次元に
+            if img_features.dim() > 2:
+                pooled_features = img_features.mean(dim=1)  # [B, seq_len, dim] -> [B, dim]
+            else:
+                pooled_features = img_features
+            
+            all_features.append(pooled_features)
+        
+        # 複数画像がある場合は平均
+        if len(all_features) > 1:
+            vision_features = torch.stack(all_features, dim=0).mean(dim=0)
+        else:
+            vision_features = all_features[0]
+        
+        # 最終的にfloat32型であることを確認
+        return vision_features.float()
 
 
 class SmolVLAPolicyWrapper(nn.Module):
@@ -79,7 +169,24 @@ class SmolVLAPolicyWrapper(nn.Module):
             return mean_action
         
         # 確率的サンプリング
+        # log_stdの値をクランプして安定化
+        self.log_std.data = torch.clamp(self.log_std.data, min=-10.0, max=2.0)
+        
+        # デバッグ用ログ出力
+        logger = logging.getLogger(__name__)
+        if torch.isnan(self.log_std).any():
+            logger.warning(f"NaN detected in log_std: {self.log_std}")
+            self.log_std.data.fill_(np.log(0.1))  # デフォルト値にリセット
+        
         std = torch.exp(self.log_std)
+        
+        # std値のチェック
+        if torch.isnan(std).any() or (std <= 0).any():
+            logger.warning(f"Invalid std values detected: {std}")
+            std = torch.full_like(std, 0.1)  # デフォルト値に置換
+        
+        logger.debug(f"log_std: {self.log_std.data}, std: {std}")
+        
         # mean_actionの形状に合わせてstdを調整
         if mean_action.dim() == 2:  # [n_action_steps, action_dim]
             std = std.unsqueeze(0).expand(mean_action.shape[0], -1)
@@ -91,27 +198,51 @@ class SmolVLAPolicyWrapper(nn.Module):
     
     def compute_action_logprob(self, obs: Dict, action: np.ndarray, task: str) -> torch.Tensor:
         """ガウス分布ベースのlog probabilityを計算"""
-        batch = self._prepare_batch(obs, task)
-        
-        # SmolVLAから決定論的な平均行動を取得
-        with torch.no_grad():
-            mean_action = self.smolvla_policy.select_action(batch)
+        distribution = self.compute_action_distribution(obs, task)
         
         # actionをtensorに変換
         action_tensor = torch.from_numpy(action).float().to(self.log_std.device)
         if action_tensor.dim() == 1:
             action_tensor = action_tensor.unsqueeze(0)
         
+        # ガウス分布のlog probabilityを計算
+        log_prob = distribution.log_prob(action_tensor)
+        
+        # 数値的安定性のために平均を取る（全次元の和ではなく）
+        log_prob = log_prob.mean()  # 次元数で正規化
+        
+        return log_prob
+    
+    def compute_action_distribution(self, obs: Dict, task: str) -> dist.Normal:
+        """ガウス分布オブジェクトを返す"""
+        batch = self._prepare_batch(obs, task)
+        
+        # SmolVLAから決定論的な平均行動を取得
+        with torch.no_grad():
+            mean_action = self.smolvla_policy.select_action(batch)
+        
+        # log_stdの値をクランプして安定化
+        self.log_std.data = torch.clamp(self.log_std.data, min=-10.0, max=2.0)
+        
+        # デバッグ用ログ出力
+        logger = logging.getLogger(__name__)
+        if torch.isnan(self.log_std).any():
+            logger.warning(f"NaN detected in log_std (compute_action_distribution): {self.log_std}")
+            self.log_std.data.fill_(np.log(0.1))  # デフォルト値にリセット
+        
         # 標準偏差を取得
         std = torch.exp(self.log_std)
+        
+        # std値のチェック
+        if torch.isnan(std).any() or (std <= 0).any():
+            logger.warning(f"Invalid std values detected (compute_action_distribution): {std}")
+            std = torch.full_like(std, 0.1)  # デフォルト値に置換
+        
         if mean_action.dim() == 2:  # [n_action_steps, action_dim]
             std = std.unsqueeze(0).expand(mean_action.shape[0], -1)
         
-        # ガウス分布のlog probabilityを計算
-        dist = torch.distributions.Normal(mean_action, std)
-        log_prob = dist.log_prob(action_tensor).sum()  # 全次元の和
-        
-        return log_prob
+        # ガウス分布を作成して返す
+        return dist.Normal(mean_action, std)
     
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         batch = {}
@@ -143,11 +274,19 @@ class PPOTrainer:
         self.config = config
         self.device = device
         
-        # 価値関数ネットワーク
-        self.value_network = ValueNetwork(
-            state_dim=config.get('state_dim', 7),
-            hidden_dim=config.get('value_hidden_dim', 256)
-        ).to(device)
+        # 価値関数ネットワーク（画像特徴量を使用）
+        if config.get('use_image_value_network', True):
+            self.value_network = ImageValueNetwork(
+                smolvla_policy=policy.smolvla_policy,
+                hidden_dim=config.get('value_hidden_dim', 256)
+            ).to(device)
+            self.use_image_value = True
+        else:
+            self.value_network = ValueNetwork(
+                state_dim=config.get('state_dim', 7),
+                hidden_dim=config.get('value_hidden_dim', 256)
+            ).to(device)
+            self.use_image_value = False
         
         # オプティマイザー（分離型）
         # PPO用のlog_stdのみを学習
@@ -235,14 +374,19 @@ class PPOTrainer:
                 if done or truncated:
                     break
             # 価値関数による状態価値推定
-            state_tensor = self._extract_state_tensor(obs)
-            with torch.no_grad():
-                value = self.value_network(state_tensor).item()
+            if self.use_image_value:
+                obs_batch = self.policy._prepare_batch(obs_copy, task_desc)
+                with torch.no_grad():
+                    value = self.value_network(obs_batch).item()
+            else:
+                state_tensor = self._extract_state_tensor(obs)
+                with torch.no_grad():
+                    value = self.value_network(state_tensor).item()
             # ActionSequence作成（1 chunk = 1 action）
             action_seq = ActionSequence(
                 observation=obs_copy,
                 action=np.array(action_chunk),  # n_action_steps分のアクション
-                reward=chunk_total_reward,  # chunk全体の累積報酬
+                reward=chunk_total_reward / n_action_steps,  # chunk全体の累積報酬を正規化
                 value=value,
                 task=task_desc
             )
@@ -328,22 +472,44 @@ class PPOTrainer:
         total_value_loss = 0.0
         
         for _ in range(self.value_update_epochs):
-            states = []
-            for seq in sequences:
-                state = self._extract_state_tensor(seq.observation)
-                states.append(state)
-            
-            if not states:
-                continue
+            if self.use_image_value:
+                # 画像価値関数の場合
+                predicted_values = []
+                for seq in sequences:
+                    obs_batch = self.policy._prepare_batch(seq.observation, seq.task)
+                    value = self.value_network(obs_batch)
+                    predicted_values.append(value)
                 
-            states_tensor = torch.cat(states, dim=0)
-            returns_tensor = torch.from_numpy(returns).float().to(self.device)
-            
-            # 価値関数の予測
-            predicted_values = self.value_network(states_tensor)
-            
-            # 価値関数のloss
-            value_loss = F.mse_loss(predicted_values, returns_tensor)
+                if not predicted_values:
+                    continue
+                    
+                predicted_values_tensor = torch.stack(predicted_values).squeeze(-1)
+                returns_tensor = torch.from_numpy(returns).float().to(self.device)
+                
+                # 価値関数のloss
+                value_loss = F.mse_loss(predicted_values_tensor, returns_tensor)
+            else:
+                # 従来の状態価値関数の場合
+                states = []
+                for seq in sequences:
+                    state = self._extract_state_tensor(seq.observation)
+                    states.append(state)
+                
+                if not states:
+                    continue
+                    
+                states_tensor = torch.cat(states, dim=0)
+                returns_tensor = torch.from_numpy(returns).float().to(self.device)
+                
+                # 価値関数の予測
+                predicted_values = self.value_network(states_tensor)
+                
+                # テンソル形状を合わせる
+                if predicted_values.dim() > 1:
+                    predicted_values = predicted_values.squeeze(-1)
+                
+                # 価値関数のloss
+                value_loss = F.mse_loss(predicted_values, returns_tensor)
             
             # 価値関数の更新
             self.value_optimizer.zero_grad()
@@ -443,9 +609,9 @@ class PPOTrainer:
                 total_flow_matching_loss += flow_matching_loss
             
             # KLダイバージェンスが大きすぎる場合は早期停止
-            if kl_div > self.config.get('target_kl', 0.02):
-                self.logger.info(f"Early stopping at PPO epoch {ppo_epoch} due to high KL divergence: {kl_div:.4f}")
-                break
+            # if kl_div > self.config.get('target_kl', 0.02):
+            #     self.logger.info(f"Early stopping at PPO epoch {ppo_epoch} due to high KL divergence: {kl_div:.4f}")
+            #     break
         
         num_epochs = ppo_epoch + 1
         avg_policy_loss = total_policy_loss / num_epochs
@@ -468,37 +634,70 @@ class PPOTrainer:
     def _update_ppo_only(self, sequences: List[ActionSequence], advantages_tensor: torch.Tensor, 
                         old_log_probs_tensor: torch.Tensor) -> Tuple[float, float, float]:
         """PPOの部分のみを更新（log_stdパラメータのみ）"""
-        # 新しいlog probを計算
+        # 古い分布と新しい分布を作成
+        old_distributions = []
+        new_distributions = []
         new_log_probs = []
         entropies = []
         
         for seq in sequences:
             try:
+                # 新しい分布を取得
+                new_dist = self.policy.compute_action_distribution(seq.observation, seq.task)
+                new_distributions.append(new_dist)
+                
+                # log probを計算
                 log_prob = self.policy.compute_action_logprob(
                     seq.observation, seq.action, seq.task
                 )
                 new_log_probs.append(log_prob)
                 
-                # エントロピー計算
-                std = torch.exp(self.policy.log_std)
-                entropy = 0.5 * (std.log() + np.log(2 * np.pi * np.e)).sum()
+                # 古い分布を再構築（detachして勾配計算を無効化）
+                with torch.no_grad():
+                    old_mean = new_dist.mean.detach()
+                    old_std = new_dist.stddev.detach()
+                    old_dist = dist.Normal(old_mean, old_std)
+                    old_distributions.append(old_dist)
+                
+                # エントロピー計算（PyTorchの分布から）
+                entropy = new_dist.entropy().sum()
                 entropies.append(entropy)
                 
             except Exception as e:
-                self.logger.warning(f"Failed to compute new log prob: {e}")
+                self.logger.warning(f"Failed to compute distributions: {e}")
+                # デフォルト値を設定
+                default_mean = torch.zeros(1, device=self.device, requires_grad=True)
+                default_std = torch.ones(1, device=self.device, requires_grad=True)
+                new_distributions.append(dist.Normal(default_mean, default_std))
+                old_distributions.append(dist.Normal(default_mean.detach(), default_std.detach()))
                 new_log_probs.append(torch.tensor(-10.0, device=self.device, requires_grad=True))
                 entropies.append(torch.tensor(0.0, device=self.device, requires_grad=True))
         
         new_log_probs_tensor = torch.stack(new_log_probs)
         entropy_tensor = torch.stack(entropies)
         
+        # log_probの差をクランプして数値的安定性を向上
+        log_prob_diff = torch.clamp(new_log_probs_tensor - old_log_probs_tensor, min=-10.0, max=10.0)
+        
         # 重要度サンプリング比
-        ratio = torch.exp(new_log_probs_tensor - old_log_probs_tensor)
+        ratio = torch.exp(log_prob_diff)
         
-        # KLダイバージェンス
-        kl_div = (old_log_probs_tensor - new_log_probs_tensor).mean()
+        # PyTorchのKLダイバージェンスを使用（必ず非負値）
+        kl_divs = []
+        for old_dist, new_dist in zip(old_distributions, new_distributions):
+            try:
+                kl_div_sample = dist.kl_divergence(old_dist, new_dist).sum()
+                kl_divs.append(kl_div_sample)
+            except Exception as e:
+                self.logger.warning(f"Failed to compute KL divergence: {e}")
+                kl_divs.append(torch.tensor(0.0, device=self.device))
         
-        # PPO loss
+        kl_div = torch.stack(kl_divs).mean()
+        
+        # 数値的安定性のためにクランプ（非負値を保証）
+        kl_div = torch.clamp(kl_div, min=0.0, max=50.0)
+        
+        # PPO loss（数値的安定性を向上）
         surr1 = ratio * advantages_tensor
         surr2 = torch.clamp(
             ratio, 
@@ -506,8 +705,12 @@ class PPOTrainer:
             1.0 + self.config['clip_epsilon']
         ) * advantages_tensor
         
-        policy_loss = -torch.min(surr1, surr2).mean()
-        entropy_loss = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
+        policy_loss_raw = -torch.min(surr1, surr2).mean()
+        entropy_loss_raw = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
+        
+        # 損失値をクランプして数値爆発を防止
+        policy_loss = torch.clamp(policy_loss_raw, min=-1e6, max=1e6)
+        entropy_loss = torch.clamp(entropy_loss_raw, min=-1e6, max=1e6)
         
         # PPOのみの更新（log_stdのみ）
         total_loss = policy_loss + entropy_loss
