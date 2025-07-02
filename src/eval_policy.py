@@ -46,7 +46,7 @@ def process_image_for_video(image_array, target_height, target_width):
 
 def main(training_name, observation_height, observation_width, episode_num, show_viewer, checkpoint_step="last"):
     policy_list = ["act", "diffusion", "pi0", "tdmpc", "vqbet", "smolvla"]
-    task_list = ["test"]
+    task_list = ["test", "simple_pick"]
     output_directory = Path(f"outputs/eval/{training_name}_{checkpoint_step}")
     output_directory.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -193,7 +193,16 @@ def main(training_name, observation_height, observation_width, episode_num, show
         valid_frames = [f for f in frames if f is not None and isinstance(f, np.ndarray)]
         if valid_frames:
             fps = env.metadata.get("render_fps", 30)
-            video_path = output_directory / f"rollout_ep{ep+1}.mp4"
+            if task_name == "simple_pick":
+                task_desc = env.get_task_description()
+                if "red" in task_desc:
+                    video_path = output_directory / f"ep{ep+1}_red.mp4"
+                elif "blue" in task_desc:
+                    video_path = output_directory / f"ep{ep+1}_blue.mp4"
+                else:
+                    video_path = output_directory / f"ep{ep+1}_green.mp4"
+            else:
+                video_path = output_directory / f"ep{ep+1}.mp4"
             # Ensure all frames are uint8, HWC, and have the correct combined shape
             processed_valid_frames = []
             for f_val in valid_frames:
@@ -234,12 +243,12 @@ def main(training_name, observation_height, observation_width, episode_num, show
         f.write(f"Success rate: {success_num}/{episode_num} ({(success_num / episode_num) * 100:.2f}%)\n")
 
 if __name__ == "__main__":
-    training_name = "smolvla_test_0"
-    observation_height = 480
-    observation_width = 640
+    training_name = "smolvla_simple_pick"
+    observation_height = 512 # 480
+    observation_width = 512 # 640
     episode_num = 5
     show_viewer = False
-    checkpoint_step = "last"
+    checkpoint_step = "060000"
     main(
         training_name=training_name,
         observation_height=observation_height,

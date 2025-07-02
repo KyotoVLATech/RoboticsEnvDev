@@ -103,7 +103,7 @@ uv run -m lerobot.scripts.train \
     --wandb.enable=true \
     --wandb.disable_artifact=true \
     --batch_size=64 \
-    --steps=250000
+    --steps=200000
 ```
 学習後の`config.json`の`n_action_steps`が1になっているので編集して50にする
 ## ポリシーの評価

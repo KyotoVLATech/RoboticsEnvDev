@@ -49,7 +49,7 @@ def main(config):
 
 if __name__ == "__main__":
     config = {
-        'task': 'simple_pick',
+        'task': 'simple_pick', # タスク名
         'observation_height': 512,
         'observation_width': 512,
         'show_viewer': False,
@@ -58,20 +58,20 @@ if __name__ == "__main__":
         'policy_lr': 1e-5,
         'value_lr': 1e-4,
         'gamma': 0.99,
-        'gae_lambda': 0.95,
+        'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
         'ppo_epochs': 4,
         'max_episode_steps': 500,
         'max_grad_norm': 0.5,
-        'wandb_project': 'smolvla-ppo',
+        'wandb_project': 'smolvla',
         'wandb_run_name': None,
         'checkpoint_dir': 'outputs/rl_checkpoints_ppo',
         'save_freq': 50,
         'record_video': True,
         'video_freq': 10,
         'video_fps': 30,
-        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",
-        'n_action_steps': 20,
+        'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
+        'n_action_steps': 10,
         'initial_std': 0.1,  # 初期標準偏差
         'entropy_coef': 0.01,  # エントロピー係数
         'target_kl': 0.02,  # KLダイバージェンスの閾値
