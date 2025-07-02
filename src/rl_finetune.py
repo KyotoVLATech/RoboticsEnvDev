@@ -54,7 +54,7 @@ if __name__ == "__main__":
         'observation_width': 512,
         'show_viewer': False,
         'epochs': 1000, # 学習エポック数
-        'batch_size': 1,  # 8 1epochに実行するエピソード数
+        'batch_size': 4,  # 8 1epochに実行するエピソード数
         'policy_lr': 1e-5,
         'value_lr': 1e-4,
         'gamma': 0.99,
@@ -71,18 +71,18 @@ if __name__ == "__main__":
         'video_freq': 10, # 10 動画を記録する頻度
         'video_fps': 30,
         'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
-        'n_action_steps': 10,
+        'n_action_steps': 50, # action chunk sizeと一致させないとエラー
         'initial_std': 0.1,  # 初期標準偏差
         'entropy_coef': 0.01,  # エントロピー係数
         'target_kl': 0.02,  # KLダイバージェンスの閾値
         'value_hidden_dim': 256,
-        'value_stable_threshold': 100.0,  # 0.1 価値関数の安定性判定閾値
-        'value_stable_window': 2,       # 10 安定性判定のためのウィンドウサイズ
-        'value_update_epochs': 5, # 価値関数の更新エポック数
+        'value_stable_threshold': 1.0,  # 0.1 価値関数の安定性判定閾値
+        'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
+        'value_update_epochs': 4, # 価値関数の更新エポック数
         
         # ハイブリッド学習用の新しいパラメータ
         'smolvla_lr': 1e-6,              # SmolVLA用の学習率（PPOより低く設定）
-        'smolvla_warmup_epochs': 1,     # 50 SmolVLA学習開始までのエポック数
+        'smolvla_warmup_epochs': 50,     # SmolVLA学習開始までのエポック数
         'flow_matching_coef': 0.1,       # Flow Matching損失の係数
     }
     main(config)

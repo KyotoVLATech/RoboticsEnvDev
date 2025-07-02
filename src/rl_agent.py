@@ -375,46 +375,17 @@ class PPOTrainer:
         num_valid = 0
         
         for seq in sequences:
-            try:
-                # バッチを準備
-                batch = self.policy._prepare_batch(seq.observation, seq.task)
-                
-                # アクションをテンソル形式に変換
-                action_tensor = torch.from_numpy(seq.action).float().to(self.device)
-                
-                # 正しい形状に調整: [batch_size, sequence_length, action_dim]
-                if action_tensor.dim() == 2:  # [n_action_steps, action_dim]
-                    action_tensor = action_tensor.unsqueeze(0)  # [1, n_action_steps, action_dim]
-                elif action_tensor.dim() == 1:  # [action_dim]
-                    action_tensor = action_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, action_dim]
-                
-                # アクションをmax_action_dimにパディング
-                max_action_dim = self.policy.smolvla_policy.config.max_action_dim
-                current_action_dim = action_tensor.shape[-1]
-                
-                if current_action_dim < max_action_dim:
-                    # パディングを追加
-                    pad_size = max_action_dim - current_action_dim
-                    padding = torch.zeros(
-                        action_tensor.shape[0], action_tensor.shape[1], pad_size,
-                        dtype=action_tensor.dtype, device=action_tensor.device
-                    )
-                    action_tensor = torch.cat([action_tensor, padding], dim=-1)
-                elif current_action_dim > max_action_dim:
-                    # 切り捨て
-                    action_tensor = action_tensor[:, :, :max_action_dim]
-                
-                # Flow Matching損失を計算 - 正しいACTION定数を使用
-                loss, _ = self.policy.smolvla_policy.forward(
-                    {**batch, ACTION: action_tensor}
-                )
-                
-                total_loss = total_loss + loss
-                num_valid += 1
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to compute flow matching loss: {e}")
-                continue
+            # バッチを準備
+            batch = self.policy._prepare_batch(seq.observation, seq.task)
+            
+            # アクションをテンソル形式に変換
+            action_tensor = torch.from_numpy(seq.action).float().to(self.device).unsqueeze(0)  # [1, n_action_steps, action_dim]
+            loss, _ = self.policy.smolvla_policy.forward(
+                {**batch, ACTION: action_tensor}
+            )
+            
+            total_loss = total_loss + loss
+            num_valid += 1
         
         if num_valid > 0:
             return total_loss / num_valid
