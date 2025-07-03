@@ -56,16 +56,17 @@ if __name__ == "__main__":
         'observation_width': 512,
         'show_viewer': False,
         'epochs': 1000, # 学習エポック数
-        'smolvla_warmup_epochs': 5, # 50 SmolVLA学習開始までのエポック数
+        'smolvla_warmup_epochs': 50, # SmolVLA学習開始までのエポック数
         'ppo_epochs': 4, # PPO+SmolVLAの更新エポック数
         'value_update_epochs': 10, # 価値関数の更新エポック数
-        'batch_size': 1, # 1epochに実行するエピソード数
-        'policy_lr': 1e-5, # log_stdとSmolVLAの学習率 SmolVLA用の学習率は2.5e-6 1e-4で勾配爆発
-        'value_lr': 3e-5, # 価値関数の学習率
+        'batch_size': 4, # 1epochに実行するエピソード数
+        'log_std_lr': 1e-2, # log_stdの学習率
+        'smolvla_lr': 1e-6, # SmolVLAの学習率 LeRobotのSmolVLAのデフォルトの学習率は2.5e-6
+        'value_lr': 1e-5, # 価値関数の学習率 3e-5
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
-        'kl_thresh': 100, # KLダイバージェンスの閾値
+        'kl_thresh': 10.0, # KLダイバージェンスの閾値
         'max_episode_steps': 300,
         'max_grad_norm': 0.5,
         'wandb_project': 'smolvla',
@@ -77,7 +78,7 @@ if __name__ == "__main__":
         'video_fps': 30,
         'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
         'n_action_steps': 50, # action chunk sizeと一致させないとエラー
-        'initial_std': 0.1,  # 初期標準偏差
+        'initial_std': 0.05,  # 初期標準偏差
         'entropy_coef': 0.01, # エントロピー係数
         'value_hidden_dim': 256,
         'use_image_value_network': True, # 画像特徴量を使った価値関数を使用

@@ -24,29 +24,50 @@ class ActionSequence:
     task: str = ""
 
 class ValueNetwork(nn.Module):
-    """価値関数ネットワーク"""
-    def __init__(self, state_dim: int, hidden_dim: int = 256):
+    """価値関数ネットワーク（gym環境用に拡張）"""
+    def __init__(self, state_dim: int, hidden_dim: int = 256, normalize_input: bool = True):
         super().__init__()
+        self.normalize_input = normalize_input
+        
+        # 入力正規化用のパラメータ
+        if self.normalize_input:
+            self.input_mean = nn.Parameter(torch.zeros(state_dim), requires_grad=False)
+            self.input_std = nn.Parameter(torch.ones(state_dim), requires_grad=False)
+        
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(), 
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
+        # 入力正規化
+        if self.normalize_input:
+            state = (state - self.input_mean) / (self.input_std + 1e-8)
+        
         return self.network(state).squeeze(-1)
+    
+    def update_normalization(self, states: torch.Tensor):
+        """観測の正規化パラメータを更新"""
+        if self.normalize_input and states.numel() > 0:
+            self.input_mean.data = states.mean(dim=0)
+            self.input_std.data = states.std(dim=0)
 
 class ImageValueNetwork(nn.Module):
     """
     画像特徴量を使った価値関数ネットワーク
     現在の実装ではVLMのトークナイザを流用しているが，最終的にはVLMのActionExpertへの出力を取ってきて入力としたい．
+    attentionプーリングの実装を検討
+    もしSmolVLA側に[CLS]トークンがあればそれを使う
     """
     def __init__(self, smolvla_policy: SmolVLAPolicy, hidden_dim: int = 256):
         super().__init__()
         self.smolvla_policy = smolvla_policy
-        self._vision_feature_dim = 64*2 + 48 # いったんマジックナンバーで指定
+        self._vision_feature_dim = 960*3
         # 価値関数のヘッド
         self.value_head = nn.Sequential(
             nn.Linear(self._vision_feature_dim, hidden_dim),
@@ -63,7 +84,7 @@ class ImageValueNetwork(nn.Module):
             vision_features = self._extract_vision_features(obs_batch)
             # SmolVLAのテキストエンコーダーを使ってタスク記述をエンコード
             text_features = self._extract_text_features(obs_batch)
-            features = torch.cat([vision_features, text_features], dim=-1) # ([B, 64 * 2 + 48])
+            features = torch.cat([vision_features, text_features], dim=-1)
         if features.device != self.value_head[0].weight.device:
             self.value_head.to(features.device)
         value = self.value_head(features)
@@ -92,7 +113,7 @@ class ImageValueNetwork(nn.Module):
         lang_emb = self.smolvla_policy.model.vlm_with_expert.embed_language_tokens(lang_tokens)
         # ([1, 48, 960])
         # 平均値プーリング
-        pooled_features = lang_emb.mean(dim=-1) # ([B, 48])
+        pooled_features = lang_emb.mean(dim=1)
         return pooled_features.float()
     
     def _extract_vision_features(self, obs_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -122,11 +143,11 @@ class ImageValueNetwork(nn.Module):
             img_features = img_features.float()
             # ([B, 64, 960])
             # 平均値プーリング
-            pooled_features = img_features.mean(dim=-1) # ([B, 64])
+            pooled_features = img_features.mean(dim=1)
             all_features.append(pooled_features)
         
         # 画像をconcat
-        vision_features = torch.cat(all_features, dim=-1)  # ([B, 64 * 2])
+        vision_features = torch.cat(all_features, dim=-1)  # ([B, 1920])
         return vision_features.float()
 
 
@@ -193,8 +214,8 @@ class SmolVLAPolicyWrapper(nn.Module):
         # ガウス分布のlog probabilityを計算
         log_prob = distribution.log_prob(action_tensor)
         
-        # 数値的安定性のために平均を取る（全次元の和ではなく）
-        log_prob = log_prob.mean()  # 次元数で正規化
+        log_prob = log_prob.mean()
+        # log_prob = log_prob.sum() # 行動シーケンス全体を生成する確率なので，こちらが正しい．しかしlrを調整しなければ勾配爆発が起きる
         
         return log_prob
     
@@ -254,12 +275,11 @@ class PPOTrainer:
             ).to(device)
             self.use_image_value = False
         
-        # オプティマイザー（統合型）
-        # SmolVLAのパラメータとlog_stdの両方を含む統合オプティマイザ
-        self.ppo_optimizer = torch.optim.AdamW(
-            list(self.policy.smolvla_policy.parameters()) + [self.policy.log_std], 
-            lr=config['policy_lr']
-        )
+        # オプティマイザー
+        self.ppo_optimizer = torch.optim.AdamW([
+            {'params': self.policy.smolvla_policy.parameters(), 'lr': config.get('smolvla_lr', 2.5e-6)},
+            {'params': [self.policy.log_std], 'lr': config.get('log_std_lr', 1e-4)}
+        ])
         self.value_optimizer = torch.optim.AdamW(
             self.value_network.parameters(), 
             lr=config['value_lr']
@@ -573,7 +593,7 @@ class PPOTrainer:
         # 重要度サンプリング比
         ratio = torch.exp(log_prob_diff)
         
-        # PyTorchのKLダイバージェンスを使用（必ず非負値）
+        # KLダイバージェンスを計算
         kl_divs = []
         for old_dist, new_dist in zip(old_distributions, new_distributions):
             kl_div_sample = dist.kl_divergence(old_dist, new_dist).sum()
@@ -581,7 +601,7 @@ class PPOTrainer:
         
         kl_div = torch.stack(kl_divs).mean()
         
-        # PPO loss（数値的安定性を向上）
+        # PPO loss
         surr1 = ratio * advantages_tensor
         surr2 = torch.clamp(
             ratio, 
@@ -617,7 +637,7 @@ class PPOTrainer:
         
         for epoch in range(self.config['epochs']):
             self.epoch = epoch
-            self.logger.info(f"Epoch {epoch + 1}/{self.config['epochs']}")
+            self.logger.info(f"Epoch {epoch}/{self.config['epochs']}")
             
             # データ収集
             sequences = self.collect_trajectories()
