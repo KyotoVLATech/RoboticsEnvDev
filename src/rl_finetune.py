@@ -35,11 +35,9 @@ def main(config):
     
     if config['pretrained_model_path']:
         smolvla_policy = SmolVLAPolicy.from_pretrained(config['pretrained_model_path'])
-        smolvla_policy.config.n_action_steps = config['n_action_steps']
     else:
-        smolvla_config = SmolVLAConfig()
-        smolvla_config.n_action_steps = config['n_action_steps']
-        smolvla_policy = SmolVLAPolicy(smolvla_config)
+        print("Pretrained model path is not set. Using default SmolVLA configuration.")
+        return
     
     # action_dimをconfigから取得、またはデフォルト値を使用
     action_dim = smolvla_policy.config.output_features["action"].shape[0]
@@ -52,19 +50,22 @@ def main(config):
 
 if __name__ == "__main__":
     config = {
-        'debug': False,  # デバッグモード
+        'debug': False, # デバッグモード
         'task': 'simple_pick', # タスク名
         'observation_height': 512,
         'observation_width': 512,
         'show_viewer': False,
         'epochs': 1000, # 学習エポック数
-        'batch_size': 1, # 4 1epochに実行するエピソード数
-        'policy_lr': 1e-5,
-        'value_lr': 1e-4, # 1e-5だと学習が進まなかった
+        'smolvla_warmup_epochs': 10, # 50 SmolVLA学習開始までのエポック数
+        'ppo_epochs': 4, # PPO+SmolVLAの更新エポック数
+        'value_update_epochs': 10, # 価値関数の更新エポック数
+        'batch_size': 1, # 1epochに実行するエピソード数
+        'policy_lr': 1e-4, # log_stdパラメータの学習率 1e-5だとほぼ学習されない．
+        'value_lr': 3e-5, # 価値関数の学習率
+        'smolvla_lr': 1e-5, # SmolVLA用の学習率
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
-        'ppo_epochs': 4, # 1回の更新でPPOの学習を何エポック行うか
         'max_episode_steps': 300,
         'max_grad_norm': 0.5,
         'wandb_project': 'smolvla',
@@ -77,17 +78,10 @@ if __name__ == "__main__":
         'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
         'n_action_steps': 50, # action chunk sizeと一致させないとエラー
         'initial_std': 0.1,  # 初期標準偏差
-        'entropy_coef': 0.01,  # エントロピー係数
+        'entropy_coef': 0.01, # エントロピー係数
         'target_kl': 0.02,  # KLダイバージェンスの閾値
         'value_hidden_dim': 256,
-        'use_image_value_network': True,  # 画像特徴量を使った価値関数を使用
-        'value_stable_threshold': 1.0,  # 価値関数の安定性判定閾値（正規化後の報酬に合わせて調整）
-        'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
-        'value_update_epochs': 4, # 価値関数の更新エポック数
-        
-        # ハイブリッド学習用の新しいパラメータ
-        'smolvla_lr': 1e-6,              # SmolVLA用の学習率（PPOより低く設定）
-        'smolvla_warmup_epochs': 10,     # 50 SmolVLA学習開始までのエポック数
-        'flow_matching_coef': 0.1,       # Flow Matching損失の係数
+        'use_image_value_network': True, # 画像特徴量を使った価値関数を使用
+        'flow_matching_coef': 0.1, # Flow Matching損失の係数
     }
     main(config)

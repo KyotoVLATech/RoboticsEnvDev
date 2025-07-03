@@ -46,11 +46,11 @@ class ImageValueNetwork(nn.Module):
         self._vision_feature_dim = 960
         # 価値関数のヘッド
         self.value_head = nn.Sequential(
-            nn.Linear(self._vision_feature_dim, self.hidden_dim),
+            nn.Linear(self._vision_feature_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(), 
-            nn.Linear(self.hidden_dim, 1)
+            nn.Linear(hidden_dim, 1)
         )
     
     def forward(self, obs_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -250,16 +250,10 @@ class PPOTrainer:
             self.value_network.parameters(), 
             lr=config['value_lr']
         )
-        print(f"Value network parameters: {sum(p.numel() for p in self.value_network.parameters())}")
-        print(f"Trainable parameters: {sum(p.numel() for p in self.value_network.parameters() if p.requires_grad)}")
         self.logger = logging.getLogger(__name__)
         self.epoch = 0
         self.video_frames = []
         
-        # 価値関数安定化用の変数
-        self.value_loss_history = []
-        self.value_stable_threshold = config.get('value_stable_threshold', 0.01)
-        self.value_stable_window = config.get('value_stable_window', 10)
         self.value_update_epochs = config.get('value_update_epochs', 5)
         
         # SmolVLA学習制御用の変数
@@ -401,15 +395,6 @@ class PPOTrainer:
         
         return advantages, returns
     
-    def is_value_function_stable(self) -> bool:
-        """価値関数が安定しているかを判定"""
-        if len(self.value_loss_history) < self.value_stable_window:
-            return False
-        
-        recent_losses = self.value_loss_history[-self.value_stable_window:]
-        loss_std = np.std(recent_losses)
-        return loss_std < self.value_stable_threshold
-    
     def update_value_function(self, sequences: List[ActionSequence], returns: np.ndarray) -> float:
         """価値関数を更新"""
         total_value_loss = 0.0
@@ -425,7 +410,6 @@ class PPOTrainer:
                     
                 predicted_values_tensor = torch.stack(predicted_values).squeeze(-1)
                 returns_tensor = torch.from_numpy(returns).float().to(self.device)
-                
                 # 価値関数のloss
                 print(f"predicted values: {predicted_values_tensor[0]}, returns: {returns_tensor[0]}")
                 value_loss = F.mse_loss(predicted_values_tensor, returns_tensor)
@@ -458,16 +442,8 @@ class PPOTrainer:
                     self.config['max_grad_norm']
                 )
             self.value_optimizer.step()
-            
             total_value_loss += value_loss.item()
-        
         avg_value_loss = total_value_loss / self.value_update_epochs
-        self.value_loss_history.append(avg_value_loss)
-        
-        # 履歴を適切なサイズに保つ
-        if len(self.value_loss_history) > self.value_stable_window * 2:
-            self.value_loss_history = self.value_loss_history[-self.value_stable_window:]
-        
         return avg_value_loss
     
     def compute_flow_matching_loss(self, sequences: List[ActionSequence]) -> torch.Tensor:
@@ -493,12 +469,7 @@ class PPOTrainer:
         else:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
     
-    def should_update_smolvla(self, epoch: int) -> bool:
-        """SmolVLAの更新タイミングを制御"""
-        return (self.is_value_function_stable() and 
-                epoch >= self.smolvla_warmup_epochs)
-    
-    def update_policy_hybrid(self, sequences: List[ActionSequence], advantages: np.ndarray, epoch: int) -> Dict:
+    def update_policy(self, sequences: List[ActionSequence], advantages: np.ndarray) -> Dict:
         """PPO損失とFlow Matching損失を組み合わせたハイブリッド学習"""
         # アドバンテージの正規化
         if len(advantages) > 1:
@@ -506,13 +477,18 @@ class PPOTrainer:
         
         advantages_tensor = torch.from_numpy(advantages).float().to(self.device)
         
-        # 古いlog probを一括計算
+        # 古いlog probと古い分布を計算
         old_log_probs = []
+        old_distributions = []
         for seq in sequences:
             log_prob = self.policy.compute_action_logprob(
                 seq.observation, seq.action, seq.task
             )
             old_log_probs.append(log_prob.detach())
+            old_dist = self.policy.compute_action_distribution(seq.observation, seq.task)
+            # 分布のパラメータをdetachして新しい分布を作成
+            detached_dist = dist.Normal(old_dist.loc.detach(), old_dist.scale.detach())
+            old_distributions.append(detached_dist)
         
         old_log_probs_tensor = torch.stack(old_log_probs)
         
@@ -523,23 +499,16 @@ class PPOTrainer:
         
         for ppo_epoch in range(self.config.get('ppo_epochs', 4)):
             # PPO更新 (log_stdのみ)
-            ppo_loss, entropy_loss, kl_div = self._update_ppo_only(
-                sequences, advantages_tensor, old_log_probs_tensor
-            )
+            ppo_loss, entropy_loss, kl_div = self._update_ppo_only(sequences, advantages_tensor, old_log_probs_tensor, old_distributions)
             
             total_policy_loss += ppo_loss
             total_entropy_loss += entropy_loss
             total_kl_div += kl_div
             
             # SmolVLA更新 (warmup後のみ)
-            if self.should_update_smolvla(epoch):
+            if self.epoch >= self.smolvla_warmup_epochs:
                 flow_matching_loss = self._update_smolvla_only(sequences)
                 total_flow_matching_loss += flow_matching_loss
-            
-            # KLダイバージェンスが大きすぎる場合は早期停止
-            # if kl_div > self.config.get('target_kl', 0.02):
-            #     self.logger.info(f"Early stopping at PPO epoch {ppo_epoch} due to high KL divergence: {kl_div:.4f}")
-            #     break
         
         num_epochs = ppo_epoch + 1
         avg_policy_loss = total_policy_loss / num_epochs
@@ -556,14 +525,11 @@ class PPOTrainer:
             'avg_reward': np.mean([seq.reward for seq in sequences]),
             'avg_advantage': np.mean(advantages),
             'std_mean': torch.exp(self.policy.log_std).mean().item(),
-            'smolvla_updated': self.should_update_smolvla(epoch)
         }
     
-    def _update_ppo_only(self, sequences: List[ActionSequence], advantages_tensor: torch.Tensor, 
-                        old_log_probs_tensor: torch.Tensor) -> Tuple[float, float, float]:
+    def _update_ppo_only(self, sequences: List[ActionSequence], advantages_tensor: torch.Tensor, old_log_probs_tensor: torch.Tensor, old_distributions: torch.Tensor) -> Tuple[float, float, float]:
         """PPOの部分のみを更新（log_stdパラメータのみ）"""
-        # 古い分布と新しい分布を作成
-        old_distributions = []
+        # 新しい分布を作成
         new_distributions = []
         new_log_probs = []
         entropies = []
@@ -578,13 +544,6 @@ class PPOTrainer:
                 seq.observation, seq.action, seq.task
             )
             new_log_probs.append(log_prob)
-            
-            # 古い分布を再構築（detachして勾配計算を無効化）
-            with torch.no_grad():
-                old_mean = new_dist.mean.detach()
-                old_std = new_dist.stddev.detach()
-                old_dist = dist.Normal(old_mean, old_std)
-                old_distributions.append(old_dist)
             
             # エントロピー計算（PyTorchの分布から）
             entropy = new_dist.entropy().sum()
@@ -646,10 +605,6 @@ class PPOTrainer:
             self.smolvla_optimizer.step()
         
         return flow_matching_loss.item()
-
-    def update_policy(self, sequences: List[ActionSequence], advantages: np.ndarray) -> Dict:
-        """レガシー互換性のため維持、内部でハイブリッド学習を呼び出し"""
-        return self.update_policy_hybrid(sequences, advantages, self.epoch)
     
     def train(self):
         self.logger.info(f"Starting PPO training for {self.config['epochs']} epochs")
@@ -662,19 +617,12 @@ class PPOTrainer:
             sequences = self.collect_trajectories()
             # アドバンテージ計算
             advantages, returns = self.compute_advantages(sequences)
-            
             # 価値関数の更新
             value_loss = self.update_value_function(sequences, returns)
-            
-            # 価値関数が安定している場合のみポリシーを更新
-            policy_update_info = {'policy_loss': 0.0, 'policy_updated': False}
-            if self.is_value_function_stable():
-                policy_update_info = self.update_policy(sequences, advantages)
-                policy_update_info['policy_updated'] = True
-                self.logger.info(f"Policy updated (value function is stable, loss std: {np.std(self.value_loss_history[-self.value_stable_window:])})")
-            else:
-                self.logger.info(f"Policy update skipped (value function not stable, loss std: {np.std(self.value_loss_history[-self.value_stable_window:]) if len(self.value_loss_history) >= self.value_stable_window else 'N/A'})")
-            
+            # 価値関数の更新
+            policy_update_info = {'policy_loss': 0.0}
+            policy_update_info = self.update_policy(sequences, advantages)
+          
             # ログ記録
             log_dict = {
                 'epoch': epoch,
@@ -682,8 +630,6 @@ class PPOTrainer:
                 'policy_loss': policy_update_info['policy_loss'],
                 'avg_reward': np.mean([seq.reward for seq in sequences]),
                 'num_sequences': len(sequences),
-                'value_function_stable': self.is_value_function_stable(),
-                # 'policy_updated': policy_update_info['policy_updated']
             }
             
             # 追加のメトリクスを含める
@@ -693,7 +639,6 @@ class PPOTrainer:
                     'kl_divergence': policy_update_info['kl_divergence'],
                     'std_mean': policy_update_info['std_mean'],
                     'flow_matching_loss': policy_update_info.get('flow_matching_loss', 0.0),
-                    # 'smolvla_updated': policy_update_info.get('smolvla_updated', False)
                 })
             
             wandb.log(log_dict)
@@ -739,7 +684,6 @@ class PPOTrainer:
             'ppo_optimizer_state_dict': self.ppo_optimizer.state_dict(),
             'smolvla_optimizer_state_dict': self.smolvla_optimizer.state_dict(),
             'value_optimizer_state_dict': self.value_optimizer.state_dict(),
-            'value_loss_history': self.value_loss_history,
             'config': self.config
         }
         
@@ -748,4 +692,3 @@ class PPOTrainer:
         
         smolvla_path = checkpoint_dir / "smolvla_policy"
         self.policy.smolvla_policy.save_pretrained(smolvla_path)
-        wandb.save(str(policy_path))
