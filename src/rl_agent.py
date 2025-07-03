@@ -43,31 +43,23 @@ class ImageValueNetwork(nn.Module):
     def __init__(self, smolvla_policy: SmolVLAPolicy, hidden_dim: int = 256):
         super().__init__()
         self.smolvla_policy = smolvla_policy
-        
-        # SmolVLAのビジョンエンコーダーの実際の出力次元を動的に取得
-        self._vision_feature_dim = None
-        self.hidden_dim = hidden_dim
-        
-        # 価値関数のヘッドは遅延初期化
-        self.value_head = None
+        self._vision_feature_dim = 960
+        # 価値関数のヘッド
+        self.value_head = nn.Sequential(
+            nn.Linear(self._vision_feature_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU(), 
+            nn.Linear(self.hidden_dim, 1)
+        )
     
     def forward(self, obs_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """観測から価値を予測"""
         with torch.no_grad():
             # SmolVLAのビジョンエンコーダーを使って特徴量を抽出
             vision_features = self._extract_vision_features(obs_batch)
-        
-        # 価値関数のヘッドを遅延初期化
-        if self.value_head is None:
-            self._vision_feature_dim = vision_features.shape[-1]
-            self.value_head = nn.Sequential(
-                nn.Linear(self._vision_feature_dim, self.hidden_dim),
-                nn.ReLU(),
-                nn.Linear(self.hidden_dim, self.hidden_dim),
-                nn.ReLU(), 
-                nn.Linear(self.hidden_dim, 1)
-            ).to(vision_features.device)
-        
+        if vision_features.device != self.value_head[0].weight.device:
+            self.value_head.to(vision_features.device)
         value = self.value_head(vision_features)
         return value.squeeze(-1)
     
@@ -85,16 +77,6 @@ class ImageValueNetwork(nn.Module):
                     batch_size = img.shape[0]
                     device = img.device
                     img_masks.append(torch.ones(batch_size, dtype=torch.bool, device=device))
-        
-        if not images:
-            # デフォルトの特徴量を返す（float32型で）
-            # 次元は実際のビジョン特徴量と同じにする必要があるため、
-            # 一度実際の画像で次元を確認してから設定する
-            batch_size = obs_batch[list(obs_batch.keys())[0]].shape[0]
-            device = obs_batch[list(obs_batch.keys())[0]].device
-            # デフォルトは960次元（SmolVLAの実際の出力次元）
-            default_dim = getattr(self, '_vision_feature_dim', 960)
-            return torch.zeros(batch_size, default_dim, dtype=torch.float32, device=device)
         
         # SmolVLAのビジョンエンコーダーを使用して特徴量を抽出
         # VLMWithExpertモデルのembed_imageメソッドを使用
@@ -169,24 +151,7 @@ class SmolVLAPolicyWrapper(nn.Module):
             return mean_action
         
         # 確率的サンプリング
-        # log_stdの値をクランプして安定化
-        self.log_std.data = torch.clamp(self.log_std.data, min=-10.0, max=2.0)
-        
-        # デバッグ用ログ出力
-        logger = logging.getLogger(__name__)
-        if torch.isnan(self.log_std).any():
-            logger.warning(f"NaN detected in log_std: {self.log_std}")
-            self.log_std.data.fill_(np.log(0.1))  # デフォルト値にリセット
-        
         std = torch.exp(self.log_std)
-        
-        # std値のチェック
-        if torch.isnan(std).any() or (std <= 0).any():
-            logger.warning(f"Invalid std values detected: {std}")
-            std = torch.full_like(std, 0.1)  # デフォルト値に置換
-        
-        logger.debug(f"log_std: {self.log_std.data}, std: {std}")
-        
         # mean_actionの形状に合わせてstdを調整
         if mean_action.dim() == 2:  # [n_action_steps, action_dim]
             std = std.unsqueeze(0).expand(mean_action.shape[0], -1)
@@ -220,27 +185,9 @@ class SmolVLAPolicyWrapper(nn.Module):
         # SmolVLAから決定論的な平均行動を取得
         with torch.no_grad():
             mean_action = self.smolvla_policy.select_action(batch)
-        
-        # log_stdの値をクランプして安定化
-        self.log_std.data = torch.clamp(self.log_std.data, min=-10.0, max=2.0)
-        
-        # デバッグ用ログ出力
-        logger = logging.getLogger(__name__)
-        if torch.isnan(self.log_std).any():
-            logger.warning(f"NaN detected in log_std (compute_action_distribution): {self.log_std}")
-            self.log_std.data.fill_(np.log(0.1))  # デフォルト値にリセット
-        
-        # 標準偏差を取得
         std = torch.exp(self.log_std)
-        
-        # std値のチェック
-        if torch.isnan(std).any() or (std <= 0).any():
-            logger.warning(f"Invalid std values detected (compute_action_distribution): {std}")
-            std = torch.full_like(std, 0.1)  # デフォルト値に置換
-        
         if mean_action.dim() == 2:  # [n_action_steps, action_dim]
             std = std.unsqueeze(0).expand(mean_action.shape[0], -1)
-        
         # ガウス分布を作成して返す
         return dist.Normal(mean_action, std)
     
@@ -290,20 +237,21 @@ class PPOTrainer:
         
         # オプティマイザー（分離型）
         # PPO用のlog_stdのみを学習
-        self.ppo_optimizer = torch.optim.Adam(
+        self.ppo_optimizer = torch.optim.AdamW(
             [self.policy.log_std], 
             lr=config['policy_lr']
         )
         # SmolVLA全体を低い学習率で学習
-        self.smolvla_optimizer = torch.optim.Adam(
+        self.smolvla_optimizer = torch.optim.AdamW(
             self.policy.smolvla_policy.parameters(),
             lr=config.get('smolvla_lr', 1e-6)
         )
-        self.value_optimizer = torch.optim.Adam(
+        self.value_optimizer = torch.optim.AdamW(
             self.value_network.parameters(), 
             lr=config['value_lr']
         )
-        
+        print(f"Value network parameters: {sum(p.numel() for p in self.value_network.parameters())}")
+        print(f"Trainable parameters: {sum(p.numel() for p in self.value_network.parameters() if p.requires_grad)}")
         self.logger = logging.getLogger(__name__)
         self.epoch = 0
         self.video_frames = []
@@ -366,7 +314,7 @@ class PPOTrainer:
                 obs, reward, done, truncated, info = self.env.step(action)
                 # Record video frame
                 if self.config.get('record_video', False) and self.epoch % self.config.get('video_freq', 10) == 0:
-                    frame = self._render_frame(obs, task_desc)
+                    frame = self._render_frame(obs, reward, task_desc)
                     if frame is not None:
                         self.video_frames.append(frame)
                 chunk_total_reward += reward
@@ -406,33 +354,28 @@ class PPOTrainer:
             # デフォルト状態
             return torch.zeros(1, self.config.get('state_dim', 7)).to(self.device)
     
-    def _render_frame(self, obs: Dict, task_desc=None) -> Optional[np.ndarray]:
-        try:
-            frames = []
-            for key in ['observation.images.front', 'observation.images.side']:
-                if key in obs:
-                    img = obs[key]
-                    if isinstance(img, torch.Tensor):
-                        img = img.cpu().numpy()
-                    if isinstance(img, np.ndarray):
-                        img = img.copy()
-                    if img.shape[0] == 3:
-                        img = np.transpose(img, (1, 2, 0))
-                    frames.append(img)
-            
-            if frames:
-                combined = np.concatenate(frames, axis=1)
-                if combined.max() <= 1.0:
-                    combined = (combined * 255).astype(np.uint8)
-                if task_desc:
-                    # cv2.putText(combined, task_desc, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    # 文字を左下に配置
-                    cv2.putText(combined, task_desc, (10, combined.shape[0] - 20), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, 
-                                (255, 255, 255), 2)
-                return combined
-        except Exception as e:
-            self.logger.warning(f"Failed to render frame: {e}")
+    def _render_frame(self, obs: Dict, reward, task_desc=None) -> Optional[np.ndarray]:
+        frames = []
+        for key in ['observation.images.front', 'observation.images.side']:
+            if key in obs:
+                img = obs[key]
+                if isinstance(img, torch.Tensor):
+                    img = img.cpu().numpy()
+                if isinstance(img, np.ndarray):
+                    img = img.copy()
+                if img.shape[0] == 3:
+                    img = np.transpose(img, (1, 2, 0))
+                frames.append(img)
+        
+        if frames:
+            combined = np.concatenate(frames, axis=1)
+            if combined.max() <= 1.0:
+                combined = (combined * 255).astype(np.uint8)
+            # rewardを表示
+            cv2.putText(combined, f"Reward: {reward:.2f}", (10, combined.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            if task_desc:
+                cv2.putText(combined, task_desc, (10, combined.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            return combined
         return None
     
     def compute_advantages(self, sequences: List[ActionSequence]) -> Tuple[np.ndarray, np.ndarray]:
@@ -479,14 +422,12 @@ class PPOTrainer:
                     obs_batch = self.policy._prepare_batch(seq.observation, seq.task)
                     value = self.value_network(obs_batch)
                     predicted_values.append(value)
-                
-                if not predicted_values:
-                    continue
                     
                 predicted_values_tensor = torch.stack(predicted_values).squeeze(-1)
                 returns_tensor = torch.from_numpy(returns).float().to(self.device)
                 
                 # 価値関数のloss
+                print(f"predicted values: {predicted_values_tensor[0]}, returns: {returns_tensor[0]}")
                 value_loss = F.mse_loss(predicted_values_tensor, returns_tensor)
             else:
                 # 従来の状態価値関数の場合
@@ -494,9 +435,6 @@ class PPOTrainer:
                 for seq in sequences:
                     state = self._extract_state_tensor(seq.observation)
                     states.append(state)
-                
-                if not states:
-                    continue
                     
                 states_tensor = torch.cat(states, dim=0)
                 returns_tensor = torch.from_numpy(returns).float().to(self.device)
@@ -534,9 +472,6 @@ class PPOTrainer:
     
     def compute_flow_matching_loss(self, sequences: List[ActionSequence]) -> torch.Tensor:
         """SmolVLAのFlow Matching損失を計算"""
-        if not sequences:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        
         total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         num_valid = 0
         
@@ -565,9 +500,6 @@ class PPOTrainer:
     
     def update_policy_hybrid(self, sequences: List[ActionSequence], advantages: np.ndarray, epoch: int) -> Dict:
         """PPO損失とFlow Matching損失を組み合わせたハイブリッド学習"""
-        if not sequences:
-            return {'policy_loss': 0.0, 'flow_matching_loss': 0.0, 'num_sequences': 0}
-        
         # アドバンテージの正規化
         if len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -577,14 +509,10 @@ class PPOTrainer:
         # 古いlog probを一括計算
         old_log_probs = []
         for seq in sequences:
-            try:
-                log_prob = self.policy.compute_action_logprob(
-                    seq.observation, seq.action, seq.task
-                )
-                old_log_probs.append(log_prob.detach())
-            except Exception as e:
-                self.logger.warning(f"Failed to compute old log prob: {e}")
-                old_log_probs.append(torch.tensor(-10.0, device=self.device))
+            log_prob = self.policy.compute_action_logprob(
+                seq.observation, seq.action, seq.task
+            )
+            old_log_probs.append(log_prob.detach())
         
         old_log_probs_tensor = torch.stack(old_log_probs)
         
@@ -641,43 +569,30 @@ class PPOTrainer:
         entropies = []
         
         for seq in sequences:
-            try:
-                # 新しい分布を取得
-                new_dist = self.policy.compute_action_distribution(seq.observation, seq.task)
-                new_distributions.append(new_dist)
-                
-                # log probを計算
-                log_prob = self.policy.compute_action_logprob(
-                    seq.observation, seq.action, seq.task
-                )
-                new_log_probs.append(log_prob)
-                
-                # 古い分布を再構築（detachして勾配計算を無効化）
-                with torch.no_grad():
-                    old_mean = new_dist.mean.detach()
-                    old_std = new_dist.stddev.detach()
-                    old_dist = dist.Normal(old_mean, old_std)
-                    old_distributions.append(old_dist)
-                
-                # エントロピー計算（PyTorchの分布から）
-                entropy = new_dist.entropy().sum()
-                entropies.append(entropy)
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to compute distributions: {e}")
-                # デフォルト値を設定
-                default_mean = torch.zeros(1, device=self.device, requires_grad=True)
-                default_std = torch.ones(1, device=self.device, requires_grad=True)
-                new_distributions.append(dist.Normal(default_mean, default_std))
-                old_distributions.append(dist.Normal(default_mean.detach(), default_std.detach()))
-                new_log_probs.append(torch.tensor(-10.0, device=self.device, requires_grad=True))
-                entropies.append(torch.tensor(0.0, device=self.device, requires_grad=True))
+            # 新しい分布を取得
+            new_dist = self.policy.compute_action_distribution(seq.observation, seq.task)
+            new_distributions.append(new_dist)
+            
+            # log probを計算
+            log_prob = self.policy.compute_action_logprob(
+                seq.observation, seq.action, seq.task
+            )
+            new_log_probs.append(log_prob)
+            
+            # 古い分布を再構築（detachして勾配計算を無効化）
+            with torch.no_grad():
+                old_mean = new_dist.mean.detach()
+                old_std = new_dist.stddev.detach()
+                old_dist = dist.Normal(old_mean, old_std)
+                old_distributions.append(old_dist)
+            
+            # エントロピー計算（PyTorchの分布から）
+            entropy = new_dist.entropy().sum()
+            entropies.append(entropy)
         
         new_log_probs_tensor = torch.stack(new_log_probs)
         entropy_tensor = torch.stack(entropies)
-        
-        # log_probの差をクランプして数値的安定性を向上
-        log_prob_diff = torch.clamp(new_log_probs_tensor - old_log_probs_tensor, min=-10.0, max=10.0)
+        log_prob_diff = new_log_probs_tensor - old_log_probs_tensor
         
         # 重要度サンプリング比
         ratio = torch.exp(log_prob_diff)
@@ -685,17 +600,10 @@ class PPOTrainer:
         # PyTorchのKLダイバージェンスを使用（必ず非負値）
         kl_divs = []
         for old_dist, new_dist in zip(old_distributions, new_distributions):
-            try:
-                kl_div_sample = dist.kl_divergence(old_dist, new_dist).sum()
-                kl_divs.append(kl_div_sample)
-            except Exception as e:
-                self.logger.warning(f"Failed to compute KL divergence: {e}")
-                kl_divs.append(torch.tensor(0.0, device=self.device))
+            kl_div_sample = dist.kl_divergence(old_dist, new_dist).sum()
+            kl_divs.append(kl_div_sample)
         
         kl_div = torch.stack(kl_divs).mean()
-        
-        # 数値的安定性のためにクランプ（非負値を保証）
-        kl_div = torch.clamp(kl_div, min=0.0, max=50.0)
         
         # PPO loss（数値的安定性を向上）
         surr1 = ratio * advantages_tensor
@@ -705,12 +613,8 @@ class PPOTrainer:
             1.0 + self.config['clip_epsilon']
         ) * advantages_tensor
         
-        policy_loss_raw = -torch.min(surr1, surr2).mean()
-        entropy_loss_raw = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
-        
-        # 損失値をクランプして数値爆発を防止
-        policy_loss = torch.clamp(policy_loss_raw, min=-1e6, max=1e6)
-        entropy_loss = torch.clamp(entropy_loss_raw, min=-1e6, max=1e6)
+        policy_loss = -torch.min(surr1, surr2).mean()
+        entropy_loss = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
         
         # PPOのみの更新（log_stdのみ）
         total_loss = policy_loss + entropy_loss
@@ -756,10 +660,6 @@ class PPOTrainer:
             
             # データ収集
             sequences = self.collect_trajectories()
-            if not sequences:
-                self.logger.warning("No sequences collected, skipping epoch")
-                continue
-            
             # アドバンテージ計算
             advantages, returns = self.compute_advantages(sequences)
             
@@ -771,7 +671,7 @@ class PPOTrainer:
             if self.is_value_function_stable():
                 policy_update_info = self.update_policy(sequences, advantages)
                 policy_update_info['policy_updated'] = True
-                self.logger.info("Policy updated (value function is stable)")
+                self.logger.info(f"Policy updated (value function is stable, loss std: {np.std(self.value_loss_history[-self.value_stable_window:])})")
             else:
                 self.logger.info(f"Policy update skipped (value function not stable, loss std: {np.std(self.value_loss_history[-self.value_stable_window:]) if len(self.value_loss_history) >= self.value_stable_window else 'N/A'})")
             
@@ -783,7 +683,7 @@ class PPOTrainer:
                 'avg_reward': np.mean([seq.reward for seq in sequences]),
                 'num_sequences': len(sequences),
                 'value_function_stable': self.is_value_function_stable(),
-                'policy_updated': policy_update_info['policy_updated']
+                # 'policy_updated': policy_update_info['policy_updated']
             }
             
             # 追加のメトリクスを含める
@@ -793,7 +693,7 @@ class PPOTrainer:
                     'kl_divergence': policy_update_info['kl_divergence'],
                     'std_mean': policy_update_info['std_mean'],
                     'flow_matching_loss': policy_update_info.get('flow_matching_loss', 0.0),
-                    'smolvla_updated': policy_update_info.get('smolvla_updated', False)
+                    # 'smolvla_updated': policy_update_info.get('smolvla_updated', False)
                 })
             
             wandb.log(log_dict)
@@ -813,28 +713,20 @@ class PPOTrainer:
 
     def _upload_video(self, episode: int) -> None:
         """動画をWandBにアップロード"""
-        try:
-            if not self.video_frames:
-                return
-            
-            # フレームを(T, H, W, C)形式に変換
-            video_array = np.stack(self.video_frames, axis=0)  # (T, H, W, C)
-            
-            # 値の範囲を[0, 255]に正規化し、uint8に変換
-            if video_array.max() <= 1.0:
-                video_array = (video_array * 255).astype(np.uint8)
-            else:
-                video_array = video_array.astype(np.uint8)
-            # THWC -> TCHW
-            video_array = np.transpose(video_array, (0, 3, 1, 2))
-            wandb.log({
-                f"videos/video": wandb.Video(video_array, fps=30, format="mp4")
-            })
-            
-            self.logger.info(f"Uploaded evaluation video for episode {episode}")
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to upload video: {e}")
+        # フレームを(T, H, W, C)形式に変換
+        video_array = np.stack(self.video_frames, axis=0)  # (T, H, W, C)
+        
+        # 値の範囲を[0, 255]に正規化し、uint8に変換
+        if video_array.max() <= 1.0:
+            video_array = (video_array * 255).astype(np.uint8)
+        else:
+            video_array = video_array.astype(np.uint8)
+        # THWC -> TCHW
+        video_array = np.transpose(video_array, (0, 3, 1, 2))
+        wandb.log({
+            f"videos/video": wandb.Video(video_array, fps=30, format="mp4")
+        })
+        self.logger.info(f"Uploaded evaluation video for episode {episode}")
     
     def save_checkpoint(self, epoch: int):
         checkpoint_dir = Path(self.config['checkpoint_dir']) / f"epoch_{epoch}"

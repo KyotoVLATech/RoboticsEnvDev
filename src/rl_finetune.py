@@ -16,7 +16,10 @@ from src.rl_agent import SmolVLAPolicyWrapper, PPOTrainer
 
 
 def main(config):
-    logging.basicConfig(level=logging.INFO)
+    if config['debug']:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
@@ -49,14 +52,15 @@ def main(config):
 
 if __name__ == "__main__":
     config = {
+        'debug': False,  # デバッグモード
         'task': 'simple_pick', # タスク名
         'observation_height': 512,
         'observation_width': 512,
         'show_viewer': False,
         'epochs': 1000, # 学習エポック数
-        'batch_size': 4,  # 8 1epochに実行するエピソード数
+        'batch_size': 1, # 4 1epochに実行するエピソード数
         'policy_lr': 1e-5,
-        'value_lr': 1e-5,
+        'value_lr': 1e-4, # 1e-5だと学習が進まなかった
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
