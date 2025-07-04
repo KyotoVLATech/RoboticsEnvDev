@@ -41,7 +41,7 @@ class GenesisEnv(gym.Env):
             # 現在の環境をクローズ
             self.close()
             # 新しい環境を作成
-            self._env = self._make_env_task(self.task)
+            self._env = self._make_env_task()
             self.observation_space = self._env.observation_space
             self.action_space = self._env.action_space
         
@@ -92,7 +92,8 @@ class GenesisEnv(gym.Env):
         if self.task == "test":
             return "Pick up a red cube and place it in a box."
         elif self.task == "simple_pick":
-            return f"Pick up a {self._env.color} cube."
+            return self._env.color
+            # return f"Pick up a {self._env.color} cube."
         else:
             raise NotImplementedError(f"Task {self.task} is not implemented.")
 

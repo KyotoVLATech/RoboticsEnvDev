@@ -74,9 +74,9 @@ class SimplePickTask:
         # サイドカメラを追加
         self.side_cam = self.scene.add_camera(
             res=(self.observation_width, self.observation_height),
-            pos=(0.5, 1.5, 0.5),
-            lookat=(0.5, 0.0, 0.1),
-            fov=20,
+            pos=(0.4, 1.5, 0.7),
+            lookat=(0.4, 0.0, 0.1),
+            fov=28,
             GUI=False
         )
         self.scene.build()

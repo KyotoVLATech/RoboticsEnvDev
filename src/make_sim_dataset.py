@@ -159,4 +159,4 @@ if __name__ == "__main__":
             "grasp": 20, # cubeを掴む
             "lift": 50, # cubeを持ち上げる
         }
-    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=100, show_viewer=False)
+    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=300, show_viewer=False)

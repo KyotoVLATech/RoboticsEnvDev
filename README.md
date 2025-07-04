@@ -91,6 +91,7 @@ python lerobot/scripts/train.py \
 ```
 
 - smolvla
+finetune
 ```bash
 export DATASET_NAME=[データセット名]
 uv run -m lerobot.scripts.train \
@@ -103,9 +104,23 @@ uv run -m lerobot.scripts.train \
     --wandb.enable=true \
     --wandb.disable_artifact=true \
     --batch_size=64 \
+    --steps=20000
+```
+0から
+```bash
+export DATASET_NAME=[データセット名]
+uv run -m lerobot.scripts.train \
+    --dataset.repo_id=local/${DATASET_NAME} \
+    --dataset.root=datasets/${DATASET_NAME} \
+    --policy.type=smolvla \
+    --output_dir=outputs/train/smolvla_${DATASET_NAME} \
+    --job_name=smolvla_${DATASET_NAME} \
+    --policy.device=cuda \
+    --wandb.enable=true \
+    --wandb.disable_artifact=true \
+    --batch_size=64 \
     --steps=200000
 ```
-学習後の`config.json`の`n_action_steps`が1になっているので編集して50にする
 ## ポリシーの評価
 
 ポリシーのチェックポイントを入力として、[`lerobot/record.py`](https://www.google.com/search?q=%5Bhttps://github.com/huggingface/lerobot/blob/main/lerobot/record.py%5D\(https://github.com/huggingface/lerobot/blob/main/lerobot/record.py\)) の `record` スクリプトを使用できます。例えば、10個の評価エピソードを記録するには、次のコマンドを実行します。
