@@ -16,7 +16,10 @@ from src.rl_agent import SmolVLAPolicyWrapper, PPOTrainer
 
 
 def main(config):
-    logging.basicConfig(level=logging.INFO)
+    if config['debug']:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
@@ -32,15 +35,13 @@ def main(config):
     
     if config['pretrained_model_path']:
         smolvla_policy = SmolVLAPolicy.from_pretrained(config['pretrained_model_path'])
-        smolvla_policy.config.n_action_steps = config['n_action_steps']
     else:
-        smolvla_config = SmolVLAConfig()
-        smolvla_config.n_action_steps = config['n_action_steps']
-        smolvla_policy = SmolVLAPolicy(smolvla_config)
+        print("Pretrained model path is not set. Using default SmolVLA configuration.")
+        return
     
     # action_dimをconfigから取得、またはデフォルト値を使用
-    action_dim = smolvla_policy.config.output_features.action.shape[0]
-    config['state_dim'] = smolvla_policy.config.input_features.state.shape[0]
+    action_dim = smolvla_policy.config.output_features["action"].shape[0]
+    config['state_dim'] = smolvla_policy.config.input_features["observation.state"].shape[0]
     
     policy = SmolVLAPolicyWrapper(smolvla_policy, action_dim, config.get('initial_std', 0.1))
     trainer = PPOTrainer(env, policy, config, device)
@@ -49,40 +50,38 @@ def main(config):
 
 if __name__ == "__main__":
     config = {
+        'debug': False, # デバッグモード
         'task': 'simple_pick', # タスク名
         'observation_height': 512,
         'observation_width': 512,
         'show_viewer': False,
-        'epochs': 1000,
-        'batch_size': 8,  # 並行して実行するエピソード数
-        'policy_lr': 1e-5,
-        'value_lr': 1e-4,
+        'epochs': 1000, # 学習エポック数
+        'smolvla_warmup_epochs': 50, # SmolVLA学習開始までのエポック数
+        'ppo_epochs': 4, # PPO+SmolVLAの更新エポック数
+        'value_update_epochs': 10, # 価値関数の更新エポック数
+        'batch_size': 4, # 1epochに実行するエピソード数
+        'log_std_lr': 1e-2, # log_stdの学習率
+        'smolvla_lr': 1e-6, # SmolVLAの学習率 LeRobotのSmolVLAのデフォルトの学習率は2.5e-6
+        'value_lr': 1e-5, # 価値関数の学習率 3e-5
         'gamma': 0.99,
         'gae_lambda': 0.95, # Generalized Advantage Estimationのλパラメータ
         'clip_epsilon': 0.2,
-        'ppo_epochs': 4,
-        'max_episode_steps': 500,
+        'kl_thresh': 10.0, # KLダイバージェンスの閾値
+        'max_episode_steps': 300,
         'max_grad_norm': 0.5,
         'wandb_project': 'smolvla',
         'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/rl_checkpoints_ppo',
+        'checkpoint_dir': 'outputs/train/smolvla_ppo',
         'save_freq': 50,
         'record_video': True,
-        'video_freq': 10,
+        'video_freq': 10, # 10 動画を記録する頻度
         'video_fps': 30,
         'pretrained_model_path': "outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model",
-        'n_action_steps': 10,
-        'initial_std': 0.1,  # 初期標準偏差
-        'entropy_coef': 0.01,  # エントロピー係数
-        'target_kl': 0.02,  # KLダイバージェンスの閾値
+        'n_action_steps': 50, # action chunk sizeと一致させないとエラー
+        'initial_std': 0.05,  # 初期標準偏差
+        'entropy_coef': 0.01, # エントロピー係数
         'value_hidden_dim': 256,
-        'value_stable_threshold': 0.01,  # 価値関数の安定性判定閾値
-        'value_stable_window': 10,       # 安定性判定のためのウィンドウサイズ
-        'value_update_epochs': 5,        # 価値関数の更新エポック数
-        
-        # ハイブリッド学習用の新しいパラメータ
-        'smolvla_lr': 1e-6,              # SmolVLA用の学習率（PPOより低く設定）
-        'smolvla_warmup_epochs': 50,     # SmolVLA学習開始までのエポック数
-        'flow_matching_coef': 0.1,       # Flow Matching損失の係数
+        'use_image_value_network': True, # 画像特徴量を使った価値関数を使用
+        'flow_matching_coef': 0.1, # Flow Matching損失の係数
     }
     main(config)

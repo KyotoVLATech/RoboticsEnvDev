@@ -30,8 +30,8 @@ class SimplePickTask:
 
     def _build_scene(self, show_viewer):
         if not gs._initialized:
-            print("Genesis is not initialized, initializing now...")
-            gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="WARNING")
+            # print("Genesis is not initialized, initializing now...")
+            gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="ERROR")
         # シーンを初期化
         self.scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(
@@ -163,7 +163,7 @@ class SimplePickTask:
         # posとself.effの距離に基づいて報酬を計算
         eef_pos = self.eef.get_pos().cpu().numpy()
         distance = np.linalg.norm(eef_pos - pos)
-        reward = 0.5 * np.exp(-distance)
+        reward = 0.5 * np.exp(-5*distance)
         # posの高さに基づいて報酬を計算
         height = pos[2] - 0.025  # キューブの高さ
         reward += 0.5 * (1 - np.exp(-height))
