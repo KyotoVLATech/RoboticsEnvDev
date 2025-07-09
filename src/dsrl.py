@@ -790,58 +790,8 @@ def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optio
 
     return policy
 
-def main():
+def main(config):
     """メイン実行関数"""
-    
-    # 設定
-    config = {
-        # 環境設定
-        'task': 'simple_pick',
-        'observation_height': 512,
-        'observation_width': 512,
-        'show_viewer': False,
-        
-        # DSRL設定
-        'algorithm': 'NA',  # 'NA' または 'SAC'
-        'total_episodes': 2000,
-        'max_episode_length': 500,
-        'chunk_size': 50,
-        
-        # ネットワーク設定
-        'hidden_dim': 128,
-        'learning_rate': 0.0003,
-        'gamma': 0.999,
-        'tau': 0.005,
-        'target_update_freq': 2,
-        
-        # 学習設定
-        'batch_size': 256,
-        'replay_buffer_size': 100000,
-        'min_replay_size': 1000,
-        'updates_per_episode': 1,
-        
-        # ログ・保存設定
-        'use_wandb': True,
-        'wandb_project': 'dsrl-smolvla',
-        'wandb_run_name': None,  # Noneの場合は自動生成
-        'log_freq': 10,
-        'save_freq': 50,
-        'eval_freq': 50,
-        'deterministic_eval': False,
-        'checkpoint_dir': 'outputs/train/dsrl_checkpoints',
-        
-        # 動画記録設定
-        'record_video': True,
-        'video_freq': 50,  # 動画記録頻度（エピソード毎）
-        'num_eval_episodes': 1,  # 評価時のエピソード数
-        
-        # SmolVLA設定
-        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",  # 事前学習済みモデルのパス
-        'smolvla_config_overrides': {
-            'n_action_steps': 20,
-        }
-    }
-    
     # コマンドライン引数の処理
     import argparse
     parser = argparse.ArgumentParser(description="Train or evaluate a DSRL agent on SmolVLA.")
@@ -1056,4 +1006,53 @@ logging.basicConfig(
 )
 
 if __name__ == "__main__":
-    main()
+
+    # 設定
+    config = {
+        # 環境設定
+        'task': 'simple_pick',
+        'observation_height': 512,
+        'observation_width': 512,
+        'show_viewer': False,
+        
+        # DSRL設定
+        'algorithm': 'NA',  # 'NA' または 'SAC'
+        'total_episodes': 2000,
+        'max_episode_length': 500,
+        'chunk_size': 50,
+        
+        # ネットワーク設定
+        'hidden_dim': 128,
+        'learning_rate': 0.0003,
+        'gamma': 0.999,
+        'tau': 0.005,
+        'target_update_freq': 2,
+        
+        # 学習設定
+        'batch_size': 256,
+        'replay_buffer_size': 100000,
+        'min_replay_size': 1000,
+        'updates_per_episode': 1,
+        
+        # ログ・保存設定
+        'use_wandb': True,
+        'wandb_project': 'dsrl-smolvla',
+        'wandb_run_name': None,  # Noneの場合は自動生成
+        'log_freq': 10,
+        'save_freq': 50,
+        'eval_freq': 50,
+        'deterministic_eval': False,
+        'checkpoint_dir': 'outputs/train/dsrl_checkpoints',
+        
+        # 動画記録設定
+        'record_video': True,
+        'video_freq': 50,  # 動画記録頻度（エピソード毎）
+        'num_eval_episodes': 1,  # 評価時のエピソード数
+        
+        # SmolVLA設定
+        'pretrained_model_path': "outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",  # 事前学習済みモデルのパス
+        'smolvla_config_overrides': {
+            'n_action_steps': 20,
+        }
+    }
+    main(config)

@@ -152,11 +152,12 @@ class ImageValueNetwork(nn.Module):
 
 
 class SmolVLAPolicyWrapper(nn.Module):
-    def __init__(self, smolvla_policy: SmolVLAPolicy, action_dim: int, initial_std: float = 0.1):
+    def __init__(self, smolvla_policy: SmolVLAPolicy, action_dim: int, initial_std: float = 0.1, min_std: float = 0.05):
         super().__init__()
         self.smolvla_policy = smolvla_policy
         # PPO用の標準偏差パラメータを追加
         self.log_std = nn.Parameter(torch.full((action_dim,), np.log(initial_std)))
+        self.min_std = min_std  # 最小標準偏差
         
     def parameters(self):
         # SmolVLAのパラメータとlog_stdの両方を返す
@@ -225,7 +226,8 @@ class SmolVLAPolicyWrapper(nn.Module):
         
         # SmolVLAから決定論的な平均行動を取得
         mean_action = self.smolvla_policy.select_action(batch)
-        std = torch.exp(self.log_std)
+        clamped_log_std = torch.clamp(self.log_std, min=np.log(self.min_std), max=None)
+        std = torch.exp(clamped_log_std)
         if mean_action.dim() == 2:
             std = std.unsqueeze(0).expand(mean_action.shape[0], -1)
         # ガウス分布を作成して返す
@@ -600,7 +602,8 @@ class PPOTrainer:
             kl_divs.append(kl_div_sample)
         
         kl_div = torch.stack(kl_divs).mean()
-        
+        # print(f"ratio min: {ratio.min().item()}, max: {ratio.max().item()}, mean: {ratio.mean().item()}")
+        # print(f"advantages min: {advantages_tensor.min().item()}, max: {advantages_tensor.max().item()}, mean: {advantages_tensor.mean().item()}")
         # PPO loss
         surr1 = ratio * advantages_tensor
         surr2 = torch.clamp(
@@ -609,14 +612,14 @@ class PPOTrainer:
             1.0 + self.config['clip_epsilon']
         ) * advantages_tensor
         
-        policy_loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).mean() # これが巨大な値を取る．
         entropy_loss = -self.config.get('entropy_coef', 0.01) * entropy_tensor.mean()
         
         # Flow Matching損失の計算
-        flow_matching_loss = self.compute_flow_matching_loss(sequences)
+        flow_matching_loss = self.compute_flow_matching_loss(sequences) * self.flow_matching_coef
         
         # 統合損失（PPO損失 + flow_matching_coef * Flow Matching損失）
-        total_loss = policy_loss + entropy_loss + self.flow_matching_coef * flow_matching_loss
+        total_loss = policy_loss + entropy_loss + flow_matching_loss
         
         # 統合オプティマイザによる更新
         self.ppo_optimizer.zero_grad()
