@@ -34,21 +34,19 @@ To train a DSRL agent using tianshou SAC:
 
 ```bash
 cd src
-python train_dsrl_tianshou.py
+uv run src/train_dsrl_tianshou.py
 ```
 
 For algorithm testing with Pendulum environment:
 ```bash
-python train_dsrl_tianshou.py --task pendulum --no-wandb
+uv run src/train_dsrl_tianshou.py --task pendulum --no-wandb
 ```
 
 For DSRL with SmolVLA:
 ```bash
-python train_dsrl_tianshou.py \
+uv run src/train_dsrl_tianshou.py \
     --task simple_pick \
-    --pretrained_model_path path/to/smolvla/model \
-    --no-wandb \
-    --show_viewer
+    --pretrained_model_path outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model
 ```
 
 ### Evaluation
@@ -56,7 +54,7 @@ python train_dsrl_tianshou.py \
 To evaluate a trained model:
 
 ```bash
-python train_dsrl_tianshou.py \
+uv run src/train_dsrl_tianshou.py \
     --eval \
     --checkpoint_path outputs/train/dsrl_tianshou_checkpoints/epoch_100/policy.pth \
     --num_episodes 10

@@ -29,9 +29,10 @@ class SimplePickTask:
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(AGENT_DIM,), dtype=np.float32)
 
     def _build_scene(self, show_viewer):
+        # Genesis初期化の安全チェック
         if not gs._initialized:
-            # print("Genesis is not initialized, initializing now...")
             gs.init(backend=gs.cpu, precision="32", debug=False, logging_level="ERROR")
+
         # シーンを初期化
         self.scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(

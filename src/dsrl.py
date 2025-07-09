@@ -59,175 +59,46 @@ class SmolVLAWrapper:
         # 1. 自己受容状態の次元
         self.proprioceptive_dim = getattr(self.smolvla_policy.config, 'max_state_dim', 32)
         
-        # 2. VLM最終トークン特徴量の次元（論文では2048次元）
-        self.vlm_final_token_dim = self.vlm_hidden_size
+        # 2. テキスト特徴量の次元（ImageValueNetworkと同様）
+        self.text_features_dim = 960
         
-        # 3. 視覚特徴量の次元（SmolVLAの実際の画像エンコーダー出力次元に基づく）
-        # embed_imageメソッドから実際の次元を取得
-        self.visual_features_dim = self._get_visual_features_dim()
+        # 3. 視覚特徴量の次元（ImageValueNetworkと同様）
+        self.visual_features_dim = 960 * 2
         
         # 総合的な状態特徴量の次元
         self.total_state_dim = (
             self.proprioceptive_dim + 
-            self.vlm_final_token_dim + 
+            self.text_features_dim + 
             self.visual_features_dim
         )
-    
-    def _get_visual_features_dim(self) -> int:
-        """
-        SmolVLAの画像エンコーダーから実際の視覚特徴量次元を取得
-        
-        Returns:
-            int: 視覚特徴量の次元（複数カメラ分を考慮）
-        """
-        try:
-            # ダミー画像を作成してembed_imageメソッドで実際の出力次元を確認
-            dummy_img = torch.randn(1, 3, 224, 224, device=self.device)
-            
-            # SmolVLAの正規化処理を適用
-            dummy_img = dummy_img * 2.0 - 1.0
-            
-            with torch.no_grad():
-                # embed_imageで実際の特徴量を取得
-                img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(dummy_img)
-                
-                # 特徴量の次元を取得
-                if img_features.dim() == 3:  # (batch, seq_len, hidden_dim)
-                    single_cam_dim = img_features.shape[-1]
-                elif img_features.dim() == 4:  # (batch, height, width, hidden_dim)
-                    single_cam_dim = img_features.shape[-1]
-                else:
-                    single_cam_dim = img_features.shape[-1]
-                
-                # 2カメラ分の次元（front, side）
-                total_visual_dim = single_cam_dim * 2
-                
-                logging.info(f"Detected visual feature dimensions: {single_cam_dim} per camera, {total_visual_dim} total")
-                return total_visual_dim
-                
-        except Exception as e:
-            logging.warning(f"Failed to detect visual feature dimensions: {e}. Using fallback value.")
-            # フォールバック：SmolVLAの隠れ状態次元を使用
-            return self.vlm_hidden_size
-    
+
     def extract_state_features(self, obs: Dict, task_desc: str) -> torch.Tensor:
         """
-        論文に基づく状態特徴量の抽出
-        
-        論文の記述：
-        "We input the proprioceptive state, the final token's last hidden feature 
-        from π0's VLM backbone (a 2,048-dimensional vector), and visual features 
-        into the noise policy."
-        
-        SmolVLA.sample_actionsの実装を参考に、実際にVLMの順伝播を行って
-        最終トークンの隠れ特徴量を取得する。
+        ImageValueNetworkを参考にした効率的な状態特徴量の抽出
         
         Args:
             obs: 環境からの観測
             task_desc: タスク記述
         
         Returns:
-            torch.Tensor: 論文に基づく状態特徴量
+            torch.Tensor: 統合された状態特徴量
         """
         with torch.no_grad():
             batch = self._prepare_batch(obs, task_desc)
-            
             # 1. 自己受容状態（proprioceptive state）の取得
             proprioceptive_state = self.smolvla_policy.prepare_state(batch)  # (1, state_dim)
-            
-            # 2. VLMバックボーンの最終トークンの隠れ特徴量を正しく取得
-            images, img_masks = self.smolvla_policy.prepare_images(batch)
-            lang_tokens, lang_masks = self.smolvla_policy.prepare_language(batch)
-            
-            # SmolVLA.sample_actionsと同様の処理でVLMの隠れ特徴量を取得
-            prefix_embs, prefix_pad_masks, prefix_att_masks = \
-                self.smolvla_policy.model.embed_prefix(
-                    images, img_masks, lang_tokens, lang_masks, state=proprioceptive_state
-                )
-            
-            # VLMの順伝播を行って隠れ特徴量を取得
-            # make_att_2d_masksをインポートして使用
-            from lerobot.common.policies.smolvla.modeling_smolvla import make_att_2d_masks
-            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-            
-            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-            
-            # VLMの順伝播を実行して隠れ特徴量を取得
-            vlm_outputs, _ = self.smolvla_policy.model.vlm_with_expert.forward(
-                attention_mask=prefix_att_2d_masks,
-                position_ids=prefix_position_ids,
-                past_key_values=None,
-                inputs_embeds=[prefix_embs, None],
-                use_cache=False,
-                fill_kv_cache=True,
-            )
-            
-            # VLM出力から最終トークンの隠れ特徴量を抽出
-            prefix_hidden_states = vlm_outputs[0]  # (batch_size, seq_len, hidden_dim)
-            
-            # 論文に基づく：最終トークンの隠れ特徴量を取得（2,048次元）
-            valid_mask = prefix_pad_masks.bool()
-            # 各バッチについて最後の有効なトークンのインデックスを見つける
-            last_valid_indices = valid_mask.sum(dim=1) - 1  # (batch_size,)
-            batch_indices = torch.arange(prefix_hidden_states.shape[0], device=prefix_hidden_states.device)
-            final_token_features = prefix_hidden_states[batch_indices, last_valid_indices]  # (batch_size, hidden_dim)
-            
-            # 3. 視覚特徴量の取得（SmolVLAの実装に基づく）
-            # SmolVLAのembed_imageメソッドを使用して豊富な視覚特徴量を取得
-            visual_features_list = []
-            image_keys = ['observation.images.front', 'observation.images.side']
-            
-            for key in image_keys:
-                if key in batch:
-                    img_tensor = batch[key]  # (1, C, H, W)
-                    
-                    # SmolVLAの画像エンコーダーを使用して特徴量を抽出
-                    # prepare_imagesと同様の前処理を適用
-                    img_processed = img_tensor.clone()
-                    
-                    # SmolVLAの正規化: [0,1] -> [-1,1] (SigLIP用)
-                    if img_processed.max() <= 1.0:
-                        img_processed = img_processed * 2.0 - 1.0
-                    
-                    # SmolVLAのembed_imageメソッドを使用
-                    img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(img_processed)
-                    
-                    # 画像特徴量の次元を削減（Global Average Pooling）
-                    if img_features.dim() == 3:  # (batch, seq_len, hidden_dim)
-                        img_features = img_features.mean(dim=1)  # (batch, hidden_dim)
-                    elif img_features.dim() == 4:  # (batch, height, width, hidden_dim)
-                        img_features = img_features.mean(dim=(1, 2))  # (batch, hidden_dim)
-                    
-                    visual_features_list.append(img_features)
-            
-            if visual_features_list:
-                # 複数画像の特徴量を結合
-                visual_features = torch.cat(visual_features_list, dim=-1)  # 複数画像を結合
-            else:
-                # 画像がない場合はゼロベクトル
-                visual_features = torch.zeros(1, self.visual_features_dim, device=self.device)
-            
-            # 視覚特徴量の次元を調整
-            if visual_features.shape[-1] != self.visual_features_dim:
-                if visual_features.shape[-1] > self.visual_features_dim:
-                    visual_features = visual_features[:, :self.visual_features_dim]
-                else:
-                    pad_size = self.visual_features_dim - visual_features.shape[-1]
-                    visual_features = F.pad(visual_features, (0, pad_size))
-            
+            # 2. テキスト特徴量の抽出（ImageValueNetworkと同様）
+            text_features = self._extract_text_features(batch)
+            # 3. 視覚特徴量の抽出（ImageValueNetworkと同様）
+            visual_features = self._extract_vision_features(batch)
             # 4. 全ての特徴量を結合
-            # - proprioceptive_state: (1, state_dim)
-            # - final_token_features: (1, hidden_dim) ≈ 2048次元
-            # - visual_features: (1, visual_dim)
-            
             state_features = torch.cat([
                 proprioceptive_state.flatten(),      # 自己受容状態
-                final_token_features.flatten(),      # VLM最終トークン特徴量（実際のVLM出力）
-                visual_features.flatten()            # 視覚特徴量
+                text_features.flatten(),              # テキスト特徴量
+                visual_features.flatten()             # 視覚特徴量
             ], dim=0)
-            
             return state_features
-    
+
     def generate_actions_from_noise(self, state_features: torch.Tensor, 
                                   latent_noise: torch.Tensor, 
                                   obs: Dict, task_desc: str) -> torch.Tensor:
@@ -280,6 +151,69 @@ class SmolVLAWrapper:
                 actions = self.smolvla_policy._pi_aloha_encode_actions(actions)
             
             return actions.squeeze(0)  # バッチ次元を除去
+    
+    def _extract_text_features(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """SmolVLAのテキストエンコーダーから特徴量を抽出（ImageValueNetworkから移植）"""
+        device = list(batch.values())[0].device if batch else self.device
+        tasks = batch["task"]
+        batch_size = 1  # DSRLでは通常バッチサイズは1
+        
+        # tasksがstrならリスト化
+        if isinstance(tasks, str):
+            tasks = [tasks]
+        # tasksの長さがバッチサイズと異なる場合は複製
+        if len(tasks) != batch_size:
+            tasks = [tasks[0] for _ in range(batch_size)]
+        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
+        
+        tokenized_prompt = self.smolvla_policy.language_tokenizer.__call__(
+            tasks,
+            padding=self.smolvla_policy.config.pad_language_to,
+            padding_side="right",
+            max_length=self.smolvla_policy.config.tokenizer_max_length,
+            return_tensors="pt",
+        )
+        lang_tokens = tokenized_prompt["input_ids"].to(device=device)
+        lang_emb = self.smolvla_policy.model.vlm_with_expert.embed_language_tokens(lang_tokens)
+        
+        # 平均値プーリング
+        pooled_features = lang_emb.mean(dim=1)
+        return pooled_features.float()
+    
+    def _extract_vision_features(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """SmolVLAのビジョンエンコーダーから特徴量を抽出（ImageValueNetworkから移植）"""
+        # 画像を取得
+        images = []
+        
+        for key in ['observation.images.front', 'observation.images.side']:
+            if key in batch:
+                img = batch[key]
+                if img.dim() == 4:  # [B, C, H, W]
+                    images.append(img)
+        
+        # SmolVLAのビジョンエンコーダーを使用して特徴量を抽出
+        all_features = []
+        for img in images:
+            # 画像を[-1, 1]の範囲に正規化（SmolVLAの要求に合わせる）
+            if img.max() <= 1.0:
+                img = img * 2.0 - 1.0
+            
+            # 画像埋め込み
+            img_features = self.smolvla_policy.model.vlm_with_expert.embed_image(img)
+            img_features = img_features.float()
+            
+            # 平均値プーリング
+            pooled_features = img_features.mean(dim=1)
+            all_features.append(pooled_features)
+        
+        if all_features:
+            # 画像をconcat
+            vision_features = torch.cat(all_features, dim=-1)
+        else:
+            # 画像がない場合はゼロベクトル
+            vision_features = torch.zeros(1, self.visual_features_dim, device=self.device)
+        
+        return vision_features.float()
     
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         """観測をSmolVLA用のバッチ形式に変換"""
