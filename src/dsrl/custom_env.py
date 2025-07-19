@@ -1,13 +1,3 @@
-"""
-NoiseActionEnv - Tianshou compatible wrapper for DSRL
-
-This environment wrapper:
-1. Takes latent noise as actions from RL agent
-2. Uses SmolVLAPolicy to convert noise to actual actions  
-3. Executes actual actions in GenesisEnv
-4. Returns rich state features as observations
-"""
-
 import gymnasium as gym
 import numpy as np
 import torch
@@ -16,11 +6,11 @@ import sys
 import os
 import cv2
 from typing import Optional
+import wandb
 # Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from env.genesis_env import GenesisEnv
 from src.dsrl.dsrl import SmolVLAWrapper, load_smolvla_model
-import wandb
 
 class BaseCustomEnv(gym.Env):
     """
@@ -43,28 +33,27 @@ class BaseCustomEnv(gym.Env):
     def render(self, mode="rgb_array"):
         """環境の描画"""
         return self.genesis_env.render()
-    
+
     def close(self):
         """環境を閉じる"""
         self.genesis_env.close()
-    
+
     def get_task_description(self):
         """タスク記述を取得"""
         return self.genesis_env.get_task_description()
-    
+
     def start_video_recording(self):
         """動画記録を開始"""
         self.record_video = True
         self.frames = []
-    
+
     def stop_video_recording(self):
         """動画記録を停止"""
         self.record_video = False
         return self.frames
-    
+
     def _render_frame(self, obs: Optional[dict] = None, reward: Optional[float] = None, task_desc: Optional[str] = None) -> Optional[np.ndarray]:
         """動画用フレームをレンダリング
-        
         Args:
             obs: 観測データ（Noneの場合はself.current_obsを使用）
         Returns:

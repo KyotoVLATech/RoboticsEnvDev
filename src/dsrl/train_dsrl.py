@@ -1,22 +1,11 @@
-"""
-DSRL Training with Unified Trainer
-
-This script implements DSRL using a unified trainer that supports multiple RL algorithms
-including SAC, PPO, DQN, etc. with automatic video recording capabilities.
-"""
-
 import os
 import sys
 import logging
-import argparse
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Dict, Any, Optional
-
-# Tianshou imports
+from typing import Dict
 import gymnasium as gym
-import tianshou as ts
 from tianshou.policy import SACPolicy, PPOPolicy, DQNPolicy
 from tianshou.data import Collector, VectorReplayBuffer
 from tianshou.env import DummyVectorEnv
@@ -24,9 +13,8 @@ from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.utils.net.discrete import Actor
 from tianshou.utils import TensorboardLogger, WandbLogger
-
 # Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv
 from src.dsrl.custom_trainer import dsrl_trainer
 
@@ -275,6 +263,8 @@ def save_checkpoint(policy, epoch: int, checkpoint_dir: str):
     logging.info(f"Checkpoint saved to {checkpoint_path}")
 
 def main(config: Dict):
+    if config['task'] == 'pendulum':
+        config['record_video'] = False  # Pendulum does not support video recording
     if config.get('use_wandb', True):
         import wandb
         wandb.init(
@@ -318,25 +308,21 @@ def main(config: Dict):
     log_path.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(log_path))
     if config.get('use_wandb', True):
-        try:
-            # wandb.initは既に行われているので、引数なしでWandbLoggerを初期化
-            logger = WandbLogger(test_interval=config.get('log_per_epoch', 1))
-            logger.load(writer)
-            logging.info("WandB logger initialized successfully")
-        except Exception as e:
-            logging.warning(f"Failed to initialize WandB logger: {e}")
-            logging.info("Falling back to TensorBoard logger")
-            logger = TensorboardLogger(writer)
+        # wandb.initは既に行われているので、引数なしでWandbLoggerを初期化
+        logger = WandbLogger(test_interval=config.get('log_per_epoch', 1))
+        logger.load(writer)
     else:
         logger = TensorboardLogger(writer)
     config['logger'] = logger
 
-    # Checkpoint function
+    # Checkpoint function with configurable save interval
     def save_fn(epoch, env_step, gradient_step):
-        save_checkpoint(policy, epoch, config['checkpoint_dir'])
+        save_interval = config.get('save_checkpoint_interval', 1)  # Default: save every epoch
+        if epoch % save_interval == 0:
+            save_checkpoint(policy, epoch, config['checkpoint_dir'])
+            logging.info(f"Checkpoint saved at epoch {epoch} (interval: {save_interval})")
 
     config['save_checkpoint_fn'] = save_fn
-
     # Training with unified trainer
     result = dsrl_trainer(
         algorithm=config['algorithm'],
@@ -362,10 +348,14 @@ if __name__ == "__main__":
         'algorithm': 'sac',  # 'sac', 'ppo', 'dqn'
 
         # Environment settings
-        'task': 'simple_pick', # pendulum, simple_pick, vla_pick, vla_visual_pick
-        'observation_height': 512,
+        # pendulum: アルゴリズム検証用
+        # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
+        # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
+        # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
+        'task': 'pendulum',
+        'observation_height': 512, # 基本的に変更しない
         'observation_width': 512,
-        'show_viewer': False,
+        'show_viewer': False, # TrueにするとGenesisのViewerが表示される
 
         # Training settings
         'max_epoch': 500,
@@ -386,7 +376,7 @@ if __name__ == "__main__":
         'tau': 0.005,
         'alpha': 0.2,
         'estimation_step': 1,
-        
+
         # PPO
         'gae_lambda': 0.95,
         'max_grad_norm': 0.5,
@@ -395,7 +385,7 @@ if __name__ == "__main__":
         'eps_clip': 0.2,
         'value_clip': True,
         'advantage_normalization': True,
-        
+
         # DQN
         'target_update_freq': 320,
 
@@ -406,9 +396,10 @@ if __name__ == "__main__":
         'use_wandb': True,
         'wandb_project': 'smolvla',
         'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/train/dsrl_unified_checkpoints',
+        'checkpoint_dir': 'outputs/train/dsrl_unified_checkpoints0',
         'resume_from_log': False,
         'log_per_epoch': 1,
+        'save_checkpoint_interval': 100,  # Save checkpoint every N epochs (1 = every epoch)
 
         # Video recording settings
         'record_video': True,  # Enable video recording during training

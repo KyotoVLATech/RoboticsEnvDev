@@ -1,19 +1,10 @@
-"""
-Custom DSRL Trainer
-
-This module provides a custom trainer class that extends tianshou's BaseTrainer
-to support both on-policy and off-policy algorithms with video recording capabilities.
-"""
-
 import logging
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Union
-
 from tianshou.data import Collector
 from tianshou.policy import BasePolicy
 from tianshou.trainer.base import BaseTrainer
 from tianshou.utils import BaseLogger, LazyLogger
-
 
 class DSRLTrainer(BaseTrainer):
     """Custom trainer that supports both on-policy and off-policy algorithms with video recording.
@@ -45,28 +36,25 @@ class DSRLTrainer(BaseTrainer):
         self.config = config or {}
         self.train_envs = train_envs
         self.last_video_epoch = 0
-        
         # Validate algorithm
         off_policy_algorithms = ['sac', 'dqn', 'ddpg', 'td3']
         on_policy_algorithms = ['ppo', 'a2c', 'trpo']
-        
         if self.algorithm not in off_policy_algorithms + on_policy_algorithms:
-            raise ValueError(f"Unsupported algorithm: {self.algorithm}. "
-                           f"Supported: {off_policy_algorithms + on_policy_algorithms}")
-        
+            raise ValueError(f"Unsupported algorithm: {self.algorithm}.\nSupported: {off_policy_algorithms + on_policy_algorithms}")
         self.is_off_policy = self.algorithm in off_policy_algorithms
         
-        super().__init__(**kwargs)
+        # Determine learning_type based on algorithm
+        learning_type = "offpolicy" if self.is_off_policy else "onpolicy"
         
+        super().__init__(learning_type=learning_type, **kwargs)
         logging.info(f"DSRLTrainer initialized with algorithm: {self.algorithm}")
         logging.info(f"Training mode: {'off-policy' if self.is_off_policy else 'on-policy'}")
         if self.video_record_interval > 0:
             logging.info(f"Video recording enabled every {self.video_record_interval} epochs")
-    
+
     def policy_update_fn(self, data: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Policy update function that handles both on-policy and off-policy algorithms."""
         assert self.train_collector is not None
-        
         if self.is_off_policy:
             # Off-policy update (SAC, DQN, DDPG, TD3)
             for _ in range(round(self.update_per_step * result["n/st"])):
@@ -85,32 +73,19 @@ class DSRLTrainer(BaseTrainer):
             step = max([1] + [len(v) for v in losses.values() if isinstance(v, list)])
             self.gradient_step += step
             self.log_update_data(data, losses)
-    
+
     def __next__(self):
         """Override __next__ to add video recording functionality."""
         result = super().__next__()
-        
         if result is None:
             return result
-        
         epoch, epoch_stat, info = result
-        
         # Check if we should record video
-        if (self.video_record_interval > 0 and 
-            self.record_video_fn is not None and
-            epoch % self.video_record_interval == 0 and
-            epoch > self.last_video_epoch and
-            self.train_envs is not None):
-            
-            try:
-                logging.info(f"Recording training video for epoch {epoch}")
-                self.record_video_fn(self.train_envs, self.policy, self.config, epoch)
-                self.last_video_epoch = epoch
-            except Exception as e:
-                logging.warning(f"Failed to record video for epoch {epoch}: {e}")
-        
+        if (self.video_record_interval > 0 and self.record_video_fn is not None and epoch % self.video_record_interval == 0 and epoch > self.last_video_epoch and self.train_envs is not None):
+            logging.info(f"Recording training video for epoch {epoch}")
+            self.record_video_fn(self.train_envs, self.policy, self.config, epoch)
+            self.last_video_epoch = epoch
         return result
-
 
 def create_dsrl_trainer(
     algorithm: str,
@@ -126,7 +101,6 @@ def create_dsrl_trainer(
     **kwargs
 ) -> DSRLTrainer:
     """Factory function to create DSRLTrainer with appropriate parameters for different algorithms.
-    
     :param str algorithm: Algorithm name ('sac', 'ppo', 'dqn', etc.)
     :param BasePolicy policy: The policy to train
     :param Collector train_collector: Training data collector
@@ -140,10 +114,8 @@ def create_dsrl_trainer(
     :param kwargs: Additional arguments passed to DSRLTrainer
     :return: Configured DSRLTrainer instance
     """
-    
     # Set algorithm-specific defaults
     off_policy_algorithms = ['sac', 'dqn', 'ddpg', 'td3']
-    
     if algorithm.lower() in off_policy_algorithms:
         # Off-policy specific parameters
         trainer_kwargs = {
@@ -158,7 +130,6 @@ def create_dsrl_trainer(
             'repeat_per_collect': config.get('repeat_per_collect', 10),
             'episode_per_test': config.get('episode_per_test', 10),
         }
-    
     # Common parameters
     common_kwargs = {
         'train_fn': config.get('train_fn'),
@@ -173,11 +144,9 @@ def create_dsrl_trainer(
         'show_progress': config.get('show_progress', True),
         'test_in_train': config.get('test_in_train', True),
     }
-    
     # Merge all kwargs
     trainer_kwargs.update(common_kwargs)
     trainer_kwargs.update(kwargs)
-    
     return DSRLTrainer(
         algorithm=algorithm,
         policy=policy,
@@ -208,10 +177,8 @@ def dsrl_trainer(
     **kwargs
 ) -> Dict[str, Union[float, str]]:
     """Wrapper function for DSRLTrainer.run() method.
-    
     This function provides the same interface as tianshou's offpolicy_trainer and onpolicy_trainer
     but automatically handles both types based on the algorithm specified.
-    
     :return: Training results dictionary
     """
     trainer = create_dsrl_trainer(
@@ -227,5 +194,4 @@ def dsrl_trainer(
         train_envs=train_envs,
         **kwargs
     )
-    
     return trainer.run()
