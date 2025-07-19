@@ -13,6 +13,7 @@ from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.utils.net.discrete import Actor
 from tianshou.utils import TensorboardLogger, WandbLogger
+from torch.utils.tensorboard import SummaryWriter
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv
@@ -156,20 +157,11 @@ def make_env(config: Dict):
     else:
         raise ValueError(f"Unknown task: {task}")
 
-
 def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     """学習中の動画を記録してWandBにアップロード"""
-    # VectorEnvの場合は最初の環境を取得
-    if hasattr(env, 'envs'):
-        actual_env:BaseCustomEnv = env.envs[0]
-        # 環境をリセット（VectorEnvの場合）
-        obs = env.reset()
-        if isinstance(obs, np.ndarray) and obs.ndim > 1:
-            obs = obs[0]  # 最初の環境の観測を取得
-    else:
-        actual_env:BaseCustomEnv = env
-        obs, info = env.reset()
-
+    actual_env : BaseCustomEnv = env.workers[0].env
+    # 環境をリセット（VectorEnvの場合）
+    obs = env.reset()
     frames = []
     done = False
     episode_length = 0
@@ -177,46 +169,25 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     device = config.get('device', 'cuda')
 
     while not done and episode_length < max_steps:
-        # フレームを記録（環境の統一されたメソッドを使用）
-        if hasattr(actual_env, 'current_obs'):
-            current_obs = actual_env.current_obs
-        else:
-            # Fallback: observationから画像を抽出
-            current_obs = {}
-            if isinstance(obs, dict):
-                current_obs = obs
-            elif hasattr(obs, '__dict__'):
-                current_obs = obs.__dict__
-        # 環境の統一されたレンダリングメソッドを使用
-        frame = actual_env._render_frame(obs=current_obs)
+        frame = actual_env.render_frame_with_info()
         if frame is not None:
             frames.append(frame)
         # アクションを選択（決定論的）
+        obs_array = obs[0]
         with torch.no_grad():
-            if isinstance(obs, np.ndarray):
-                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-            else:
-                obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0).to(device)
-            action = policy.actor(obs_tensor)[0].cpu().numpy()
+            obs_tensor = torch.FloatTensor(obs_array).unsqueeze(0).to(device)
+            # PPOのactorの出力: ((mean, std), None)
+            actor_output = policy.actor(obs_tensor)
+            # 最初の要素から平均を取得
+            mean_std_tuple = actor_output[0]
+            mean_tensor = mean_std_tuple[0]  # 平均テンソル
+            # 決定論的アクションとして平均を使用
+            action = mean_tensor.cpu().numpy()[0]  # バッチ次元を削除
         # 環境をステップ実行
-        if hasattr(env, 'envs'):
-            # VectorEnvの場合
-            obs, reward, terminated, truncated, info = env.step(np.array([action]))
-            # 結果を展開
-            if isinstance(obs, np.ndarray) and obs.ndim > 1:
-                obs = obs[0]
-            if isinstance(reward, (list, np.ndarray)):
-                reward = reward[0]
-            if isinstance(terminated, (list, np.ndarray)):
-                terminated = terminated[0]
-            if isinstance(truncated, (list, np.ndarray)):
-                truncated = truncated[0]
-            if isinstance(info, (list, np.ndarray)):
-                info = info[0] if len(info) > 0 else {}
-        else:
-            obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(np.array([action]))
         episode_length += 1
-        done = terminated or truncated
+        done = terminated[0] or truncated[0]
+    # 動画をアップロード
     actual_env.upload_video_to_wandb(frames, epoch)
 
 def save_checkpoint(policy, epoch: int, checkpoint_dir: str):
@@ -246,7 +217,7 @@ def main(config: Dict):
     train_envs = make_env(config)
     action_space = train_envs.action_space
     state_dim = train_envs.observation_space.shape[0]
-    action_dim = action_space.shape[0] if hasattr(action_space, 'shape') else action_space.n
+    action_dim = action_space.shape[0]
     train_envs = DummyVectorEnv([lambda : train_envs])
     logging.info(f"Environment: state_dim={state_dim}, action_dim={action_dim}")
     # Policy creation
@@ -298,7 +269,7 @@ def main(config: Dict):
         step_per_epoch=config.get('step_per_epoch', 10000),
         batch_size=config.get('batch_size', 256),
         config=config,
-        record_video_fn=record_training_video if config.get('record_video', False) else None,
+        record_video_fn=record_training_video if (config.get('record_video', False) and config.get('use_wandb', True)) else None,
         train_envs=train_envs if config.get('record_video', False) else None,
     )
 
@@ -307,70 +278,72 @@ def main(config: Dict):
     return result
 
 if __name__ == "__main__":
+    # pendulum: アルゴリズム検証用
+    # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
+    # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
+    # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
+    task = 'simple_pick'
+
     # Configuration
     config = {
         # Algorithm settings
-        'algorithm': 'ppo',  # 'sac', 'ppo'
+        'algorithm': 'sac',  # 使用する強化学習アルゴリズム（'sac' または 'ppo'）
 
         # Environment settings
-        # pendulum: アルゴリズム検証用
-        # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
-        # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
-        # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
-        'task': 'pendulum',
-        'observation_height': 512, # 基本的に変更しない
-        'observation_width': 512,
-        'show_viewer': False, # TrueにするとGenesisのViewerが表示される
+        'task': task,  # タスク名（例: 'pendulum', 'simple_pick', 'vla_pick', 'vla_visual_pick'）
+        'observation_height': 512, # 観測画像の高さ（基本的に変更不要）
+        'observation_width': 512,  # 観測画像の幅（基本的に変更不要）
+        'show_viewer': False, # TrueでGenesisのViewerを表示
 
         # Training settings
-        'max_epoch': 500,
-        'step_per_epoch': 10, # 1エポックあたりの学習ステップ数
-        'step_per_collect': 100, # 1回の学習ステップで収集する環境のステップ数
-        'batch_size': 4,
-        'update_per_step': 1, # Off-policy only
-        'repeat_per_collect': 10,  # On-policy only
+        'max_epoch': 1000,  # 学習の最大エポック数
+        'step_per_epoch': 10, # 1エポックあたりの環境ステップ数
+        'step_per_collect': 100, # 1回の収集で環境から得るステップ数
+        'batch_size': 4,  # バッチサイズ
+        'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
+        'repeat_per_collect': 10,  # 1回の収集ごとのネットワーク更新回数（On-policy用）
 
         # Network settings
-        'hidden_dim': 256,
-        'learning_rate': 3e-4,
-        'buffer_size': 100000,
+        'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
+        'learning_rate': 3e-4,  # 学習率
+        'buffer_size': 100000,  # リプレイバッファのサイズ
 
         # Algorithm-specific hyperparameters
         # SAC
-        'gamma': 0.99,
-        'tau': 0.005,
-        'alpha': 0.2,
-        'estimation_step': 1,
+        'gamma': 0.99,  # 割引率（SAC/PPO共通）
+        'tau': 0.005,  # ターゲットネットワークのソフト更新率（SAC用）
+        'alpha': 0.2,  # エントロピー正則化係数（SAC用）
+        'estimation_step': 1,  # 状態価値推定のステップ数（SAC用）
 
         # PPO
-        'gae_lambda': 0.95,
-        'max_grad_norm': 0.5,
-        'vf_coef': 0.5,
-        'ent_coef': 0.01,
-        'eps_clip': 0.2,
-        'value_clip': True,
-        'advantage_normalization': True,
+        'gae_lambda': 0.95,  # GAEのλパラメータ（PPO用）
+        'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム（PPO用）
+        'vf_coef': 0.5,  # 価値関数損失の重み（PPO用）
+        'ent_coef': 0.01,  # エントロピー損失の重み（PPO用）
+        'eps_clip': 0.2,  # クリッピング範囲（PPO用）
+        'value_clip': True,  # 価値関数のクリッピング有無（PPO用）
+        'advantage_normalization': True,  # アドバンテージ正規化の有無（PPO用）
 
         # DSRL settings
-        'chunk_size': 50,
+        'chunk_size': 50,  # DSRLで1チャンクに含めるステップ数
 
         # Logging and saving
-        'use_wandb': True,
-        'wandb_project': 'smolvla',
-        'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/train/dsrl_unified_checkpoints2',
-        'resume_from_log': False,
-        'log_per_epoch': 1,
-        'save_checkpoint_interval': 100,  # Save checkpoint every N epochs (1 = every epoch)
+        'use_wandb': True,  # WandBによるロギングを有効化
+        'wandb_project': 'smolvla',  # WandBプロジェクト名
+        'wandb_run_name': None,  # WandBラン名（Noneなら自動生成）
+        'checkpoint_dir': f'outputs/train/dsrl_{task}_0',  # チェックポイント保存ディレクトリ
+        'resume_from_log': False,  # ログから学習を再開するか
+        'log_per_epoch': 1,  # 何エポックごとにログを記録するか
+        'save_checkpoint_interval': 100,  # 何エポックごとにチェックポイントを保存するか（1なら毎エポック）
 
         # Video recording settings
-        'record_video': True,  # Enable video recording during training
-        'video_record_interval': 10,  # Record video every N epochs
+        'record_video': True,  # 学習中の動画記録を有効化
+        'video_record_interval': 50,  # 何エポックごとに動画を記録するか
 
         # SmolVLA settings
-        'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',
-        'smolvla_config_overrides': {
-            'n_action_steps': 10,
+        'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
+        'smolvla_config_overrides': {  # SmolVLAの設定上書き
+            'n_action_steps': 10,  # 1エピソード内のアクションステップ数
         }
     }
 

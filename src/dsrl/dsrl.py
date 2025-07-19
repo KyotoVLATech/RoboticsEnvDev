@@ -92,14 +92,8 @@ class SmolVLAWrapper:
             actions = self.smolvla_policy.model.sample_actions(
                 images, img_masks, lang_tokens, lang_masks, state, noise=noise_chunk
             )
-            # 元のaction次元に切り取り
-            if hasattr(self.smolvla_policy.config, 'output_features') and 'action' in self.smolvla_policy.config.output_features:
-                original_action_dim = self.smolvla_policy.config.output_features['action'].shape[0]
-                actions = actions[:, :, :original_action_dim]
-            else:
-                # デフォルトのアクション次元を使用
-                original_action_dim = min(self.max_action_dim, actions.shape[-1])
-                actions = actions[:, :, :original_action_dim]
+            original_action_dim = min(self.max_action_dim, actions.shape[-1])
+            actions = actions[:, :, :original_action_dim]
             # 正規化を解除
             actions = self.smolvla_policy.unnormalize_outputs({"action": actions})["action"]
             # Aloha環境の場合の変換
