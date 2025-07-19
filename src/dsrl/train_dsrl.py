@@ -258,7 +258,12 @@ def main(config: Dict):
             path = save_checkpoint(policy, epoch, config['checkpoint_dir'])
             logging.info(f"Checkpoint saved at epoch {epoch} (interval: {save_interval})")
             return path
-        return None
+        # Noneの代わりにダミーファイルを返す
+        dummy_path = Path(config['checkpoint_dir']) / "dummy.pth"
+        if not dummy_path.exists():
+            dummy_path.parent.mkdir(parents=True, exist_ok=True)
+            dummy_path.touch()
+        return str(dummy_path)
 
     config['save_checkpoint_fn'] = save_fn
     # Training with unified trainer
@@ -284,7 +289,7 @@ if __name__ == "__main__":
     # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
     # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
     # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
-    task = 'simple_pick'
+    task = 'vla_pick'
     algorithm = 'ppo'  # 使用する強化学習アルゴリズム（'sac' または 'ppo'）
 
     # Configuration
@@ -299,12 +304,15 @@ if __name__ == "__main__":
         'show_viewer': False, # TrueでGenesisのViewerを表示
 
         # Training settings
-        'max_epoch': 1000,  # 学習の最大エポック数
-        'step_per_epoch': 10, # 1エポックあたりの環境ステップ数
-        'step_per_collect': 100, # 1回の収集で環境から得るステップ数
-        'batch_size': 64,  # バッチサイズ
+        'max_epoch': 1000,  # 学習エポック数
+        'step_per_epoch': 1000, # 4096 1エポックあたりの学習ステップ数 PPOならstep_per_collectと同じにする
+        'step_per_collect': 1000, # 1回の収集で環境から集めるデータのステップ数
+        'batch_size': 64,  # 256 バッチサイズ
         'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
         'repeat_per_collect': 10,  # 1回の収集ごとのネットワーク更新回数（On-policy用）
+
+        # PPOにおける学習ステップの計算
+        # max_epoch * (step_per_collect / batch_size) * repeat_per_collect
 
         # Network settings
         'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
@@ -331,10 +339,10 @@ if __name__ == "__main__":
         'chunk_size': 50,  # DSRLで1チャンクに含めるステップ数
 
         # Logging and saving
-        'use_wandb': True,  # WandBによるロギングを有効化
+        'use_wandb': False,  # WandBによるロギングを有効化
         'wandb_project': 'smolvla',  # WandBプロジェクト名
         'wandb_run_name': None,  # WandBラン名（Noneなら自動生成）
-        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_1',  # チェックポイント保存ディレクトリ
+        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_0',  # チェックポイント保存ディレクトリ
         'resume_from_log': False,  # ログから学習を再開するか
         'log_per_epoch': 1,  # 何エポックごとにログを記録するか
         'save_checkpoint_interval': 100,  # 何エポックごとにチェックポイントを保存するか（1なら毎エポック）

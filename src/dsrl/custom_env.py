@@ -144,6 +144,8 @@ class StateObsEnv(BaseCustomEnv):
         # joint 9自由度 * 2 (位置, 速度) + boxの座標3次元 = 21次元
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf,
+            # shape=(3,), dtype=np.float32
+            # shape=(12,), dtype=np.float32
             shape=(21,), dtype=np.float32
         )
         self.old_pos = None
@@ -171,6 +173,8 @@ class StateObsEnv(BaseCustomEnv):
         else:
             raise ValueError(f"Unknown color: {self.genesis_env._env.color}")
         target_pos -= self.genesis_env._env.eef.get_pos().cpu().numpy() # エンドエフェクタからの相対位置に変換
+        # new_obs = target_pos
+        # new_obs = np.concatenate([jooint_pos, target_pos])
         new_obs = np.concatenate([jooint_pos, joint_vel, target_pos])
         self.old_pos = jooint_pos.copy()
         return new_obs

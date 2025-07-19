@@ -24,13 +24,12 @@ class SmolVLAWrapper:
             param.requires_grad = False
         self.smolvla_policy.eval()
         # 設定値を取得
-        self.chunk_size = getattr(self.smolvla_policy.config, 'chunk_size', 50)
-        self.max_action_dim = getattr(self.smolvla_policy.config, 'max_action_dim', 32)
-        self.noise_dim = self.max_action_dim  # 潜在ノイズの次元
+        self.chunk_size = self.smolvla_policy.config.chunk_size
+        self.noise_dim = self.smolvla_policy.config.max_action_dim
         # VLMの隠れ状態次元を取得
         self.vlm_hidden_size = self.smolvla_policy.model.vlm_with_expert.config.text_config.hidden_size
         # 1. 自己受容状態の次元
-        self.proprioceptive_dim = getattr(self.smolvla_policy.config, 'max_state_dim', 32)
+        self.proprioceptive_dim = self.smolvla_policy.config.max_state_dim
         # 2. テキスト特徴量の次元（ImageValueNetworkと同様）
         self.text_features_dim = 960
         # 3. 視覚特徴量の次元（ImageValueNetworkと同様）
@@ -92,9 +91,7 @@ class SmolVLAWrapper:
             actions = self.smolvla_policy.model.sample_actions(
                 images, img_masks, lang_tokens, lang_masks, state, noise=noise_chunk
             )
-            original_action_dim = min(self.max_action_dim, actions.shape[-1])
-            actions = actions[:, :, :original_action_dim]
-            # 正規化を解除
+            actions = actions[:, :self.smolvla_policy.config.n_action_steps, :self.smolvla_policy.config.output_features['action'].shape[0]]
             actions = self.smolvla_policy.unnormalize_outputs({"action": actions})["action"]
             # Aloha環境の場合の変換
             if getattr(self.smolvla_policy.config, 'adapt_to_pi_aloha', False):
