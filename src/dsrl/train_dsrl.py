@@ -339,7 +339,7 @@ if __name__ == "__main__":
         'chunk_size': 50,  # DSRLで1チャンクに含めるステップ数
 
         # Logging and saving
-        'use_wandb': False,  # WandBによるロギングを有効化
+        'use_wandb': True,  # WandBによるロギングを有効化
         'wandb_project': 'smolvla',  # WandBプロジェクト名
         'wandb_run_name': None,  # WandBラン名（Noneなら自動生成）
         'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_0',  # チェックポイント保存ディレクトリ

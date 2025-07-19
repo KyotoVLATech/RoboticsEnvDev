@@ -209,7 +209,6 @@ class NoiseActionEnv(BaseCustomEnv):
             config['smolvla_config_overrides']
         )
         self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
-        self.chunk_size = config.get('chunk_size', 50)
         # Action space: ノイズ空間
         self.action_space = gym.spaces.Box(
             low=-1.0, high=1.0, 
@@ -227,7 +226,7 @@ class NoiseActionEnv(BaseCustomEnv):
         self.task_desc = None
         self.old_pos = None
         logging.info(f"NoiseActionEnv initialized: noise_dim={self.smolvla_wrapper.noise_dim}, "
-                    f"obs_dim=21, chunk_size={self.chunk_size}")
+                    f"obs_dim=21, chunk_size={self.smolvla_wrapper.chunk_size}")
 
     def reset(self, seed=None, options=None):
         """環境をリセットし、初期状態特徴量を返す"""
@@ -282,7 +281,7 @@ class NoiseActionEnv(BaseCustomEnv):
         total_reward = 0.0
         done = False
         info = {}
-        for action_idx in range(min(self.chunk_size, len(action_chunk))):
+        for action_idx in range(min(self.smolvla_wrapper.chunk_size, len(action_chunk))):
             if done:
                 break
             action = action_chunk[action_idx]
@@ -323,7 +322,6 @@ class NoiseActionVisualEnv(BaseCustomEnv):
             config['smolvla_config_overrides']
         )
         self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
-        self.chunk_size = config.get('chunk_size', 50)
         # Action space: ノイズ空間
         self.action_space = gym.spaces.Box(
             low=-1.0, high=1.0, 
@@ -342,7 +340,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         self.task_desc = None
         logging.info(f"NoiseActionVisualEnv initialized: noise_dim={self.smolvla_wrapper.noise_dim}, "
                     f"state_dim={self.smolvla_wrapper.total_state_dim}, "
-                    f"chunk_size={self.chunk_size}")
+                    f"chunk_size={self.smolvla_wrapper.chunk_size}")
 
     def reset(self, seed=None, options=None):
         """環境をリセットし、初期状態特徴量を返す"""
@@ -379,7 +377,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         total_reward = 0.0
         done = False
         info = {}
-        for action_idx in range(min(self.chunk_size, len(action_chunk))):
+        for action_idx in range(min(self.smolvla_wrapper.chunk_size, len(action_chunk))):
             if done:
                 break
             action = action_chunk[action_idx]
