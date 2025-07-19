@@ -1,10 +1,9 @@
 import logging
-import numpy as np
 from typing import Any, Callable, Dict, Optional, Union
 from tianshou.data import Collector
 from tianshou.policy import BasePolicy
 from tianshou.trainer.base import BaseTrainer
-from tianshou.utils import BaseLogger, LazyLogger
+from tianshou.utils import LazyLogger
 
 class DSRLTrainer(BaseTrainer):
     """Custom trainer that supports both on-policy and off-policy algorithms with video recording.
