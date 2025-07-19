@@ -75,11 +75,9 @@ class SmolVLAWrapper:
     def extract_state_features(self, obs: Dict, task_desc: str) -> torch.Tensor:
         """
         ImageValueNetworkを参考にした効率的な状態特徴量の抽出
-        
         Args:
             obs: 環境からの観測
             task_desc: タスク記述
-        
         Returns:
             torch.Tensor: 統合された状態特徴量
         """

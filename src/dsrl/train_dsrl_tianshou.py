@@ -27,10 +27,7 @@ from tianshou.utils import TensorboardLogger, WandbLogger
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from env.genesis_env import GenesisEnv
-from src.dsrl import SmolVLAWrapper, load_smolvla_model
-from src.noise_action_env import NoiseActionEnv
+from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv
 
 def create_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
     """SAC用のアクター・クリティックネットワークを作成"""
@@ -85,183 +82,172 @@ def create_policy(actor, critic1, critic2, config: Dict, device: str = "cuda"):
 def make_env(config: Dict):
     """環境を作成する関数"""
     task = config['task']
-    
     if task == 'pendulum':
-        # Pendulum環境での動作確認用
         env = gym.make('Pendulum-v1')
         return env
-    else:
-        # GenesisEnv + SmolVLA環境
-        genesis_env = GenesisEnv(
-            task=config['task'],
-            observation_height=config['observation_height'],
-            observation_width=config['observation_width'],
-            show_viewer=config.get('show_viewer', False)
-        )
-        
-        # SmolVLA model
-        smolvla_policy = load_smolvla_model(
-            config['pretrained_model_path'],
-            config['smolvla_config_overrides']
-        )
-        
-        # SmolVLA wrapper
-        smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
-        
-        # NoiseActionEnv wrapper
-        env = NoiseActionEnv(
-            genesis_env=genesis_env,
-            smolvla_wrapper=smolvla_wrapper,
-            chunk_size=config.get('chunk_size', 50),
-            device=config['device']
-        )
-        
+    elif task == 'simple_pick':
+        env = StateObsEnv(config)
         return env
+    elif task == 'vla_pick':
+        env = NoiseActionEnv(config)
+        return env
+    elif task == 'vla_visual_pick':
+        env = NoiseActionVisualEnv(config)
+        return env
+    else:
+        raise ValueError(f"Unknown task: {task}")
 
 def _render_frame(obs: Dict, reward: float, task_desc: str = None) -> Optional[np.ndarray]:
     """動画用フレームをレンダリング"""
-    try:
-        frames = []
-        for key in ['observation.images.front', 'observation.images.side']:
-            if key in obs:
-                img = obs[key]
-                if isinstance(img, torch.Tensor):
-                    img = img.cpu().numpy()
-                if isinstance(img, np.ndarray):
-                    img = img.copy()
-                
-                # 画像の次元を調整 (C, H, W) -> (H, W, C)
-                if img.ndim == 3 and img.shape[0] == 3:
-                    img = np.transpose(img, (1, 2, 0))
-                
-                # 値の範囲を[0,255]に正規化
-                if img.max() <= 1.0:
-                    img = (img * 255).astype(np.uint8)
-                else:
-                    img = img.astype(np.uint8)
-                
-                frames.append(img)
-        
-        if frames:
-            # 複数の画像を横に結合
-            combined = np.concatenate(frames, axis=1)
-            
-            # 報酬を表示
-            cv2.putText(combined, f"Reward: {reward:.2f}", 
-                       (10, combined.shape[0] - 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            
-            # タスク記述を表示
-            if task_desc:
-                cv2.putText(combined, task_desc, 
-                           (10, combined.shape[0] - 20), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            
-            return combined
-    except Exception as e:
-        logging.warning(f"Failed to render frame: {e}")
-    
+    frames = []
+    for key in ['observation.images.front', 'observation.images.side']:
+        if key in obs:
+            img = obs[key]
+            if isinstance(img, torch.Tensor):
+                img = img.cpu().numpy()
+            if isinstance(img, np.ndarray):
+                img = img.copy()
+            # 画像の次元を調整 (C, H, W) -> (H, W, C)
+            if img.ndim == 3 and img.shape[0] == 3:
+                img = np.transpose(img, (1, 2, 0))
+            # 値の範囲を[0,255]に正規化
+            if img.max() <= 1.0:
+                img = (img * 255).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
+            frames.append(img)
+    if frames:
+        # 複数の画像を横に結合
+        combined = np.concatenate(frames, axis=1)
+        # 報酬を表示
+        cv2.putText(
+            combined, f"Reward: {reward:.2f}",
+            (10, combined.shape[0] - 60),
+            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2
+        )
+        # タスク記述を表示
+        if task_desc:
+            cv2.putText(
+                combined,
+                task_desc,
+                (10, combined.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 255, 255),
+                2
+            )
+        return combined
     return None
 
 def _upload_video(frames: list, epoch: int) -> None:
     """動画をWandBにアップロード"""
     if not frames:
         return
-    
-    try:
-        # フレームを(T, H, W, C)形式に変換
-        video_array = np.stack(frames, axis=0)  # (T, H, W, C)
-        
-        # 値の範囲を[0, 255]に正規化し、uint8に変換
-        if video_array.max() <= 1.0:
-            video_array = (video_array * 255).astype(np.uint8)
-        else:
-            video_array = video_array.astype(np.uint8)
-        
-        # THWC -> TCHW
-        video_array = np.transpose(video_array, (0, 3, 1, 2))
-        
-        import wandb
-        wandb.log({
-            f"videos/training_video": wandb.Video(video_array, fps=30, format="mp4")
-        })
-        logging.info(f"Uploaded training video for epoch {epoch}")
-    except Exception as e:
-        logging.warning(f"Failed to upload video: {e}")
+    # フレームを(T, H, W, C)形式に変換
+    video_array = np.stack(frames, axis=0)  # (T, H, W, C)
+    # 値の範囲を[0, 255]に正規化し、uint8に変換
+    if video_array.max() <= 1.0:
+        video_array = (video_array * 255).astype(np.uint8)
+    else:
+        video_array = video_array.astype(np.uint8)
+    # THWC -> TCHW
+    video_array = np.transpose(video_array, (0, 3, 1, 2))
+    import wandb
+    wandb.log({
+        f"videos/training_video": wandb.Video(video_array, fps=30, format="mp4")
+    })
+    logging.info(f"Uploaded training video for epoch {epoch}")
 
 def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     """学習中の動画を記録してWandBにアップロード"""
-    try:
-        # 環境をリセット
+    # VectorEnvの場合は最初の環境を取得
+    if hasattr(env, 'envs'):
+        actual_env = env.envs[0]
+        # 環境をリセット（VectorEnvの場合）
+        obs = env.reset()
+        if isinstance(obs, np.ndarray) and obs.ndim > 1:
+            obs = obs[0]  # 最初の環境の観測を取得
+    else:
+        actual_env = env
         obs, info = env.reset()
-        task_desc = env.get_task_description()
-        
-        frames = []
-        done = False
-        episode_reward = 0.0
-        episode_length = 0
-        max_steps = getattr(env, 'max_episode_steps', 100)
-        
-        device = config.get('device', 'cuda')
-        
-        while not done and episode_length < max_steps:
-            # フレームを記録
-            if hasattr(env, 'current_obs'):
-                current_obs = env.current_obs
-            else:
-                # Fallback: observationから画像を抽出
-                current_obs = {}
-                if isinstance(obs, dict):
-                    current_obs = obs
-                elif hasattr(obs, '__dict__'):
-                    current_obs = obs.__dict__
-            
-            frame = _render_frame(current_obs, episode_reward, task_desc)
-            if frame is not None:
-                frames.append(frame)
-            
-            # アクションを選択（決定論的）
-            with torch.no_grad():
-                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-                action = policy.actor(obs_tensor)[0].cpu().numpy()
-            
-            # 環境をステップ実行
-            obs, reward, terminated, truncated, info = env.step(action)
-            episode_reward += reward
-            episode_length += 1
-            done = terminated or truncated
-        
-        # 最後のフレームも記録
-        if hasattr(env, 'current_obs'):
-            current_obs = env.current_obs
-            frame = _render_frame(current_obs, episode_reward, task_desc)
-            if frame is not None:
-                frames.append(frame)
-        
-        # 動画をアップロード
-        if frames:
-            _upload_video(frames, epoch)
-            logging.info(f"Recorded training video with {len(frames)} frames for epoch {epoch}")
+    
+    # タスク記述を取得
+    task_desc = actual_env.get_task_description()
+    frames = []
+    done = False
+    episode_reward = 0.0
+    episode_length = 0
+    max_steps = getattr(actual_env, 'max_episode_steps', 100)
+    device = config.get('device', 'cuda')
+    
+    while not done and episode_length < max_steps:
+        # フレームを記録
+        if hasattr(actual_env, 'current_obs'):
+            current_obs = actual_env.current_obs
         else:
-            logging.warning(f"No frames recorded for epoch {epoch}")
-            
-    except Exception as e:
-        logging.warning(f"Failed to record training video for epoch {epoch}: {e}")
+            # Fallback: observationから画像を抽出
+            current_obs = {}
+            if isinstance(obs, dict):
+                current_obs = obs
+            elif hasattr(obs, '__dict__'):
+                current_obs = obs.__dict__
+        frame = _render_frame(current_obs, episode_reward, task_desc)
+        if frame is not None:
+            frames.append(frame)
+        
+        # アクションを選択（決定論的）
+        with torch.no_grad():
+            if isinstance(obs, np.ndarray):
+                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
+            else:
+                obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0).to(device)
+            action = policy.actor(obs_tensor)[0].cpu().numpy()
+        
+        # 環境をステップ実行
+        if hasattr(env, 'envs'):
+            # VectorEnvの場合
+            obs, reward, terminated, truncated, info = env.step(np.array([action]))
+            # 結果を展開
+            if isinstance(obs, np.ndarray) and obs.ndim > 1:
+                obs = obs[0]
+            if isinstance(reward, (list, np.ndarray)):
+                reward = reward[0]
+            if isinstance(terminated, (list, np.ndarray)):
+                terminated = terminated[0]
+            if isinstance(truncated, (list, np.ndarray)):
+                truncated = truncated[0]
+            if isinstance(info, (list, np.ndarray)):
+                info = info[0] if len(info) > 0 else {}
+        else:
+            obs, reward, terminated, truncated, info = env.step(action)
+        
+        episode_reward += reward
+        episode_length += 1
+        done = terminated or truncated
+    
+    # 最後のフレームも記録
+    if hasattr(actual_env, 'current_obs'):
+        current_obs = actual_env.current_obs
+        frame = _render_frame(current_obs, episode_reward, task_desc)
+        if frame is not None:
+            frames.append(frame)
+    
+    # 動画をアップロード
+    if frames:
+        _upload_video(frames, epoch)
+        logging.info(f"Recorded training video with {len(frames)} frames for epoch {epoch}")
+    else:
+        logging.warning(f"No frames recorded for epoch {epoch}")
 
 def save_checkpoint(policy, epoch: int, checkpoint_dir: str):
     """チェックポイントを保存"""
     checkpoint_path = Path(checkpoint_dir) / f"epoch_{epoch}"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
-    
     # Save policy
     torch.save(policy.state_dict(), checkpoint_path / "policy.pth")
-    
     logging.info(f"Checkpoint saved to {checkpoint_path}")
 
 def main(config: Dict):
-    """メイン学習関数（動画記録機能付き）"""
-    
-    # WandBの初期化を先に行う
     if config.get('use_wandb', True):
         import wandb
         wandb.init(
@@ -270,71 +256,38 @@ def main(config: Dict):
             config=config,
             sync_tensorboard=True
         )
-
     # Device設定
     device = "cuda" if torch.cuda.is_available() else "cpu"
     config['device'] = device
     logging.info(f"Using device: {device}")
-    
     # 出力ディレクトリの作成
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
-    
     # Environment作成 - Genesis制限により単一環境インスタンスを使用
-    if config['task'] == 'pendulum':
-        # Pendulum環境の場合は並列化可能
-        train_envs = DummyVectorEnv([
-            lambda: make_env(config) for _ in range(config.get('train_num', 1))
-        ])
-        test_envs = DummyVectorEnv([
-            lambda: make_env(config) for _ in range(config.get('test_num', 1))
-        ])
-        # Set action space for policy
-        env_single = make_env(config)
-        action_space = env_single.action_space
-        state_dim = env_single.observation_space.shape[0]
-        action_dim = action_space.shape[0]
-        env_single.close()
-        shared_env = None
-    else:
-        # Genesis環境の場合は単一環境インスタンスを共有
-        logging.info("Using single shared environment instance for Genesis-based tasks")
-        shared_env = make_env(config)  # 1つの環境インスタンスのみ作成
-        
-        # 同じ環境インスタンスを使用
-        train_envs = DummyVectorEnv([lambda: shared_env])
-        test_envs = DummyVectorEnv([lambda: shared_env])
-        
-        # Set action space for policy (既に作成済みの環境を使用)
-        action_space = shared_env.action_space
-        state_dim = shared_env.observation_space.shape[0]
-        action_dim = action_space.shape[0]
-    
+    train_envs = make_env(config)
+    action_space = train_envs.action_space
+    state_dim = train_envs.observation_space.shape[0]
+    action_dim = action_space.shape[0]
+    train_envs = DummyVectorEnv([lambda : train_envs])
     logging.info(f"Environment: state_dim={state_dim}, action_dim={action_dim}")
-    
     # Networks and Policy
     actor, critic1, critic2 = create_networks(
         state_dim, action_dim, config.get('hidden_dim', 256), device
     )
     policy = create_policy(actor, critic1, critic2, config, device)
-    
     # Replay buffer
     buffer = VectorReplayBuffer(
         config.get('buffer_size', 100000),
         config.get('train_num', 1)
     )
-    
     # Collectors
     train_collector = Collector(
         policy, train_envs, buffer, exploration_noise=True
     )
-    test_collector = Collector(policy, test_envs, exploration_noise=False)
-    
     # Logger
     from torch.utils.tensorboard import SummaryWriter
     log_path = Path(config['checkpoint_dir']) / 'logs'
     log_path.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(log_path))
-    
     if config.get('use_wandb', True):
         try:
             # wandb.initは既に行われているので、引数なしでWandbLoggerを初期化
@@ -352,38 +305,28 @@ def main(config: Dict):
     def save_fn(epoch, env_step, gradient_step):
         save_checkpoint(policy, epoch, config['checkpoint_dir'])
         # 動画記録とアップロード
-        if (config.get('record_video', False) and config['task'] != 'pendulum' and shared_env is not None):
-            record_training_video(shared_env, policy, config, epoch)
-    
+        if (config.get('record_video', False) and config['task'] != 'pendulum' and train_envs is not None):
+            record_training_video(train_envs, policy, config, epoch)
+
     # Training - Genesis環境での制限を考慮
     result = offpolicy_trainer(
         policy,
         train_collector,
-        None if config['task'] != 'pendulum' else test_collector,  # Genesis環境ではテストコレクターを無効化
+        None,
         max_epoch=config.get('max_epoch', 100),
         step_per_epoch=config.get('step_per_epoch', 10000),
         step_per_collect=config.get('step_per_collect', 10),
-        episode_per_test=config.get('episode_per_test', 10) if config['task'] == 'pendulum' else 0,
+        episode_per_test=0,
         batch_size=config.get('batch_size', 256),
         update_per_step=config.get('update_per_step', 0.1),
-        test_in_train=False,  # Genesis環境では常にFalse
+        test_in_train=False,
         logger=logger,
         save_checkpoint_fn=save_fn,
         resume_from_log=config.get('resume_from_log', False),
         verbose=True
     )
-    
-    # Clean up
-    if config['task'] == 'pendulum':
-        train_envs.close()
-        test_envs.close()
-    else:
-        # Genesis環境の場合は共有環境をクリーンアップ
-        train_envs.close()
-        # test_envsは同じ環境を参照しているので、追加のcloseは不要
-        if shared_env is not None:
-            shared_env.close()
-    
+
+    train_envs.close()
     logging.info("Training completed!")
     return result
 
@@ -476,45 +419,19 @@ def evaluate_policy(checkpoint_path: str, config: Dict, num_episodes: int = 10):
     return avg_reward, success_rate
 
 if __name__ == "__main__":
-    # Argument parsing
-    parser = argparse.ArgumentParser(description="Train DSRL with Tianshou SAC")
-    parser.add_argument('--eval', action='store_true', help='Run evaluation mode')
-    parser.add_argument('--checkpoint_path', type=str, help='Path to checkpoint for evaluation')
-    parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes for evaluation')
-    
-    # Configuration overrides
-    parser.add_argument('--task', type=str, default='pendulum', help='Task name (pendulum for testing, simple_pick for DSRL)')
-    parser.add_argument('--pretrained_model_path', type=str, 
-                       default="outputs/train/smolvla_test_0/checkpoints/last/pretrained_model",
-                       help='Path to pretrained SmolVLA model')
-    parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging')
-    parser.add_argument('--show_viewer', action='store_true', help='Show environment viewer')
-
-    # Video recording options
-    parser.add_argument('--no-video', action='store_true', help='Disable video recording during training')
-
-    args = parser.parse_args()
-
     # Configuration
     config = {
         # Environment settings
-        'task': args.task,
+        'task': 'simple_pick', # pendulum, simple_pick, vla_pick, vla_visual_pick
         'observation_height': 512,
         'observation_width': 512,
-        'show_viewer': args.show_viewer,
+        'show_viewer': False,
 
-        # Training settings (adjusted for Genesis limitations)
-        'max_epoch': 1000,
-        'step_per_epoch': 300,
-        'step_per_collect': 10,
-        'episode_per_test': 1,
-        'batch_size': 16,
-        'update_per_step': 0.1,
-        'test_in_train': False,
-
-        # Environment parallelization
-        'train_num': 1,  # Number of parallel training environments
-        'test_num': 1,   # Number of parallel test environments
+        'max_epoch': 500,
+        'step_per_epoch': 10, # 1エポックあたりの学習ステップ数
+        'step_per_collect': 100, # 1回の学習ステップで収集する環境のステップ数
+        'batch_size': 4,
+        'update_per_step': 1, # update_per_step: the number of times the policy network would be updated per transition after (step_per_collect) transitions are collected, e.g., if update_per_step set to 0.3, and step_per_collect is 256 , policy will be updated round(256 * 0.3 = 76.8) = 77 times after 256 transitions are collected by the collector. Default to 1.
 
         # Network settings
         'hidden_dim': 256,
@@ -531,18 +448,18 @@ if __name__ == "__main__":
         'chunk_size': 50,
 
         # Logging and saving
-        'use_wandb': not args.no_wandb,
+        'use_wandb': True,
         'wandb_project': 'smolvla',
-        'wandb_run_name': f"dsrl_sac_{args.task}",
+        'wandb_run_name': None,
         'checkpoint_dir': 'outputs/train/dsrl_tianshou_checkpoints',
         'resume_from_log': False,
         'log_per_epoch': 1,
 
         # Video recording settings
-        'record_video': not args.no_video,  # Enable video recording during training
+        'record_video': True,  # Enable video recording during training
 
         # SmolVLA settings
-        'pretrained_model_path': args.pretrained_model_path,
+        'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',
         'smolvla_config_overrides': {
             'n_action_steps': 10,
         }
@@ -554,9 +471,11 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    if args.eval:
-        if not args.checkpoint_path:
-            parser.error("--checkpoint_path is required for evaluation")
-        evaluate_policy(args.checkpoint_path, config, args.num_episodes)
+    eval = False
+    if eval:
+        # set eval parameters
+        checkpoint_path = 'hogehoge'
+        num_episodes = 10
+        evaluate_policy(checkpoint_path, config, num_episodes)
     else:
         main(config)
