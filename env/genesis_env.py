@@ -87,7 +87,7 @@ class GenesisEnv(gym.Env):
         else:
             warnings.warn("front observation is not enabled, cannot render.")
             return None
-    
+
     def get_task_description(self):
         if self.task == "test":
             return "Pick up a red cube and place it in a box."

@@ -6,7 +6,7 @@ import torch
 from pathlib import Path
 from typing import Dict
 import gymnasium as gym
-from tianshou.policy import SACPolicy, PPOPolicy, DQNPolicy
+from tianshou.policy import SACPolicy, PPOPolicy
 from tianshou.data import Collector, VectorReplayBuffer
 from tianshou.env import DummyVectorEnv
 from tianshou.utils.net.common import Net
@@ -36,45 +36,31 @@ def create_sac_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, 
     critic1 = Critic(net_c1, device=device).to(device)
     
     net_c2 = Net(
-        state_dim, action_dim, hidden_sizes=[hidden_dim, hidden_dim], 
+        state_dim, action_dim, hidden_sizes=[hidden_dim, hidden_dim],
         concat=True, device=device
     )
     critic2 = Critic(net_c2, device=device).to(device)
-    
     return actor, critic1, critic2
 
 def create_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
     """PPO用のアクター・クリティックネットワークを作成"""
-    
     # Actor network
     net_a = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
     actor = ActorProb(
         net_a, action_dim, max_action=1.0, device=device,
         unbounded=True, conditioned_sigma=True
     ).to(device)
-    
     # Critic network
     net_c = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
     critic = Critic(net_c, device=device).to(device)
-    
     return actor, critic
-
-def create_dqn_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
-    """DQN用のネットワークを作成"""
-    
-    net = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    q_net = Actor(net, action_dim, device=device).to(device)
-    
-    return q_net
 
 def create_sac_policy(actor, critic1, critic2, config: Dict, device: str = "cuda"):
     """SAC Policyを作成"""
-    
     # Optimizers
     optim_actor = torch.optim.Adam(actor.parameters(), lr=config.get('learning_rate', 3e-4))
     optim_critic1 = torch.optim.Adam(critic1.parameters(), lr=config.get('learning_rate', 3e-4))
     optim_critic2 = torch.optim.Adam(critic2.parameters(), lr=config.get('learning_rate', 3e-4))
-    
     # SAC Policy
     policy = SACPolicy(
         actor=actor,
@@ -102,8 +88,22 @@ def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
     )
     
     # Value function
-    def dist_fn(p):
-        return torch.distributions.Independent(torch.distributions.Normal(*p), 1)
+    def dist_fn(*logits):
+        # logitsは展開されて渡される場合があるので適切に処理
+        if len(logits) == 2:
+            # 平均と標準偏差が別々に渡される場合
+            mean, std = logits
+        elif len(logits) == 1:
+            # 単一のテンソルの場合、平均と標準偏差を分割
+            logits = logits[0]
+            if isinstance(logits, tuple):
+                mean, std = logits
+            else:
+                mean, std = logits.chunk(2, dim=-1)
+                std = torch.clamp(std, min=-20, max=2).exp()
+        else:
+            raise ValueError(f"Unexpected number of logits: {len(logits)}")
+        return torch.distributions.Independent(torch.distributions.Normal(mean, std), 1)
     
     # PPO Policy
     policy = PPOPolicy(
@@ -123,47 +123,18 @@ def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
         recompute_advantage=config.get('recompute_advantage', False),
         action_space=None  # Will be set by the environment
     )
-    
-    return policy
-
-def create_dqn_policy(q_net, config: Dict, device: str = "cuda"):
-    """DQN Policyを作成"""
-    
-    # Optimizer
-    optim = torch.optim.Adam(q_net.parameters(), lr=config.get('learning_rate', 1e-3))
-    
-    # DQN Policy
-    policy = DQNPolicy(
-        model=q_net,
-        optim=optim,
-        discount_factor=config.get('gamma', 0.99),
-        estimation_step=config.get('estimation_step', 1),
-        target_update_freq=config.get('target_update_freq', 320),
-        action_space=None  # Will be set by the environment
-    )
-    
     return policy
 
 def create_policy(algorithm: str, state_dim: int, action_dim: int, config: Dict, device: str = "cuda"):
     """アルゴリズムに応じたpolicyを作成"""
-    
     algorithm = algorithm.lower()
     hidden_dim = config.get('hidden_dim', 256)
-    
     if algorithm == 'sac':
         actor, critic1, critic2 = create_sac_networks(state_dim, action_dim, hidden_dim, device)
         return create_sac_policy(actor, critic1, critic2, config, device)
-    
     elif algorithm == 'ppo':
         actor, critic = create_ppo_networks(state_dim, action_dim, hidden_dim, device)
         return create_ppo_policy(actor, critic, config, device)
-    
-    elif algorithm == 'dqn':
-        if action_dim > 1:
-            raise ValueError("DQN currently only supports single discrete actions")
-        q_net = create_dqn_networks(state_dim, action_dim, hidden_dim, device)
-        return create_dqn_policy(q_net, config, device)
-    
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
 
@@ -226,13 +197,7 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
             else:
                 obs_tensor = torch.FloatTensor(np.array(obs)).unsqueeze(0).to(device)
-            # アルゴリズムに応じたアクション選択
-            if config['algorithm'].lower() in ['sac', 'ppo']:
-                action = policy.actor(obs_tensor)[0].cpu().numpy()
-            elif config['algorithm'].lower() == 'dqn':
-                action = policy(obs_tensor).logits.argmax(dim=1).cpu().numpy()
-            else:
-                action = policy.actor(obs_tensor)[0].cpu().numpy()
+            action = policy.actor(obs_tensor)[0].cpu().numpy()
         # 環境をステップ実行
         if hasattr(env, 'envs'):
             # VectorEnvの場合
@@ -287,7 +252,7 @@ def main(config: Dict):
     # Policy creation
     policy = create_policy(config['algorithm'], state_dim, action_dim, config, device)
     # Replay buffer
-    if config['algorithm'].lower() in ['sac', 'dqn', 'ddpg', 'td3']:
+    if config['algorithm'].lower() in ['sac', 'ddpg', 'td3']:
         buffer = VectorReplayBuffer(
             config.get('buffer_size', 100000),
             config.get('train_num', 1)
@@ -345,7 +310,7 @@ if __name__ == "__main__":
     # Configuration
     config = {
         # Algorithm settings
-        'algorithm': 'sac',  # 'sac', 'ppo', 'dqn'
+        'algorithm': 'ppo',  # 'sac', 'ppo'
 
         # Environment settings
         # pendulum: アルゴリズム検証用
@@ -386,9 +351,6 @@ if __name__ == "__main__":
         'value_clip': True,
         'advantage_normalization': True,
 
-        # DQN
-        'target_update_freq': 320,
-
         # DSRL settings
         'chunk_size': 50,
 
@@ -396,7 +358,7 @@ if __name__ == "__main__":
         'use_wandb': True,
         'wandb_project': 'smolvla',
         'wandb_run_name': None,
-        'checkpoint_dir': 'outputs/train/dsrl_unified_checkpoints0',
+        'checkpoint_dir': 'outputs/train/dsrl_unified_checkpoints2',
         'resume_from_log': False,
         'log_per_epoch': 1,
         'save_checkpoint_interval': 100,  # Save checkpoint every N epochs (1 = every epoch)
