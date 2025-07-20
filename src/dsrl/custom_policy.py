@@ -62,11 +62,10 @@ class SmolVLAWrapper:
             ], dim=0)
             return state_features
 
-    def generate_actions_from_noise(self, state_features: torch.Tensor, latent_noise: torch.Tensor, obs: Dict, task_desc: str) -> torch.Tensor:
+    def generate_actions_from_noise(self, latent_noise: torch.Tensor, obs: Dict, task_desc: str) -> torch.Tensor:
         """
         潜在ノイズから行動チャンクを生成
         Args:
-            state_features: VLMから抽出された状態特徴量
             latent_noise: 潜在ノイズ（単一ステップ）
             obs: 元の観測（画像等の再構築用）
             task_desc: タスク記述
@@ -75,24 +74,13 @@ class SmolVLAWrapper:
         """
         with torch.no_grad():
             batch = self._prepare_batch(obs, task_desc)
-            # 画像とlanguageの準備
-            images, img_masks = self.smolvla_policy.prepare_images(batch)
-            state = self.smolvla_policy.prepare_state(batch)
-            lang_tokens, lang_masks = self.smolvla_policy.prepare_language(batch)
-            # 論文の戦略：単一ステップのノイズをchunk_sizeにコピー
+            # 単一ステップのノイズをchunk_sizeにコピー
             if latent_noise.dim() == 1:
                 latent_noise = latent_noise.unsqueeze(0)  # バッチ次元を追加
             # (batch_size, 1, noise_dim) -> (batch_size, chunk_size, noise_dim)
-            noise_chunk = latent_noise.unsqueeze(1).repeat(1, self.chunk_size, 1)
-            # SmolVLAのsample_actionsの内部処理を模倣
-            actions = self.smolvla_policy.model.sample_actions(
-                images, img_masks, lang_tokens, lang_masks, state, noise=noise_chunk
-            )
-            actions = actions[:, :self.smolvla_policy.config.n_action_steps, :self.smolvla_policy.config.output_features['action'].shape[0]]
-            actions = self.smolvla_policy.unnormalize_outputs({"action": actions})["action"]
-            # Aloha環境の場合の変換
-            if getattr(self.smolvla_policy.config, 'adapt_to_pi_aloha', False):
-                actions = self.smolvla_policy._pi_aloha_encode_actions(actions)
+            noise_chunk = None
+            # noise_chunk = latent_noise.unsqueeze(1).repeat(1, self.chunk_size, 1)
+            actions = self.smolvla_policy._get_action_chunk(batch, noise_chunk)
             return actions.squeeze(0)  # バッチ次元を除去
 
     def _extract_text_features(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -151,43 +139,35 @@ class SmolVLAWrapper:
 
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         """観測をSmolVLA用のバッチ形式に変換"""
-        batch = {}
-        # 状態情報 - agent_posを観測状態として使用
-        if 'agent_pos' in obs:
-            agent_pos = obs['agent_pos']
-            if isinstance(agent_pos, np.ndarray):
-                agent_pos = torch.from_numpy(agent_pos.copy()).float()
+        observation = {}
+        for key in self.smolvla_policy.config.input_features:
+            # make_sim_dataset.pyの観測キーに合わせてマッピング
+            if key == "observation.state":
+                data = obs["agent_pos"]
+                tensor_data = torch.from_numpy(data).to(torch.float32)
+                observation[key] = tensor_data.to(self.device).unsqueeze(0)
+            elif key == "observation.images.front":
+                img = obs["observation.images.front"]
+                img = img.copy()  # 負のstride対策
+                tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
+                if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
+                    tensor_img = tensor_img.permute(2, 0, 1)
+                elif tensor_img.ndim == 2:
+                    tensor_img = tensor_img.unsqueeze(0)
+                observation[key] = tensor_img.to(self.device).unsqueeze(0)
+            elif key == "observation.images.side":
+                img = obs["observation.images.side"]
+                img = img.copy()  # 負のstride対策
+                tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
+                if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
+                    tensor_img = tensor_img.permute(2, 0, 1)
+                elif tensor_img.ndim == 2:
+                    tensor_img = tensor_img.unsqueeze(0)
+                observation[key] = tensor_img.to(self.device).unsqueeze(0)
             else:
-                agent_pos = agent_pos.float()
-            if agent_pos.dim() == 1:
-                agent_pos = agent_pos.unsqueeze(0)
-            batch['observation.state'] = agent_pos.to(self.device)
-        # 画像情報 - GenesisEnvの観測形式をSmolVLAの期待する形式にマッピング
-        # キーマッピングを修正：環境のキー -> SmolVLAの期待するキー
-        image_mapping = {
-            'observation.images.front': 'observation.images.front',
-            'observation.images.side': 'observation.images.side',
-        }
-        for env_key, smolvla_key in image_mapping.items():
-            if env_key in obs:
-                img = obs[env_key]
-                if isinstance(img, np.ndarray):
-                    # NumPy配列の場合
-                    img = torch.from_numpy(img.copy()).float()
-                else:
-                    # すでにTensorの場合
-                    img = img.float()
-                # 正規化 (0-255 -> 0-1)
-                if img.max() > 1.0:
-                    img = img / 255.0
-                # 次元の順序を調整: (H, W, C) -> (C, H, W)
-                if img.ndim == 3 and img.shape[2] in [1, 3, 4]:
-                    img = img.permute(2, 0, 1)
-                elif img.ndim == 2:
-                    img = img.unsqueeze(0)
-                # バッチ次元を追加してSmolVLAの期待するキーで保存
-                batch[smolvla_key] = img.to(self.device).unsqueeze(0)
-        batch['task'] = task_desc
+                print(f"Warning: Unsupported input feature '{key}'. Skipping.")
+        observation["task"] = task_desc
+        batch = self.smolvla_policy._prepare_batch(observation)
         return batch
 
 def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optional[Dict] = None) -> SmolVLAPolicy:

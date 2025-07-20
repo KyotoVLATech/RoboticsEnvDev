@@ -240,9 +240,9 @@ if __name__ == "__main__":
     training_name = "smolvla_simple_pick"
     observation_height = 512
     observation_width = 512
-    episode_num = 5
+    episode_num = 3
     show_viewer = False
-    checkpoint_step = "060000"
+    checkpoint_step = "last"
     main(
         training_name=training_name,
         observation_height=observation_height,

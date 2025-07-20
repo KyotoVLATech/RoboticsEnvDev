@@ -142,18 +142,24 @@ def make_env(config: Dict):
     task = config['task']
     if task == 'pendulum':
         env = gym.make('Pendulum-v1')
-        return env
     elif task == 'simple_pick':
         env = StateObsEnv(config)
-        return env
     elif task == 'vla_pick':
         env = NoiseActionEnv(config)
-        return env
     elif task == 'vla_visual_pick':
         env = NoiseActionVisualEnv(config)
-        return env
     else:
         raise ValueError(f"Unknown task: {task}")
+    return env
+
+def get_nested_attr(obj, attr_path, default=None):
+    current = obj
+    for attr in attr_path.split('.'):
+        try:
+            current = getattr(current, attr)
+        except AttributeError:
+            return default
+    return current
 
 def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     """学習中の動画を記録してWandBにアップロード"""
@@ -164,11 +170,10 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     episode_length = 0
     while not done and episode_length < actual_env.max_episode_steps:
         with torch.no_grad():
-            # PPOのactorの出力: ((mean, std), None)
-            action = policy.actor(obs)[0][0].cpu().numpy()[0]
+            action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))[0][0].cpu().numpy()[0]
         # 環境をステップ実行
         obs, _, terminated, truncated, _ = actual_env.step(action)
-        episode_length += 1 * getattr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
+        episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
         done = terminated or truncated
     frames = actual_env.stop_video_recording()
     if frames:

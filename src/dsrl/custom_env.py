@@ -172,14 +172,13 @@ class StateObsEnv(BaseCustomEnv):
 
     def step(self, action):
         """アクションを実行し、次の状態特徴量を返す"""
-        self.current_obs, reward, terminated, truncated, info = self.genesis_env.step(action)
+        self.current_obs, self.reward, terminated, truncated, info = self.genesis_env.step(action)
         new_obs = self.make_obs(self.current_obs)
-        self.reward = reward
         if self.record_video and not (terminated or truncated):
             frame = self.render_frame()
             if frame is not None:
                 self.frames.append(frame)
-        return new_obs, reward, terminated, truncated, info
+        return new_obs, self.reward, terminated, truncated, info
 
 class NoiseActionEnv(BaseCustomEnv):
     """
@@ -197,7 +196,7 @@ class NoiseActionEnv(BaseCustomEnv):
         # Action space: ノイズ空間
         self.action_space = gym.spaces.Box(
             low=-1.0, high=1.0,
-            shape=(self.smolvla_wrapper.noise_dim,), 
+            shape=(self.smolvla_wrapper.noise_dim,),
             dtype=np.float32
         )
         # Observation space: StateObsEnvと同じ21次元の状態ベクトル
@@ -207,7 +206,6 @@ class NoiseActionEnv(BaseCustomEnv):
         )
         # Internal state
         self.current_obs = None
-        self.current_state_features = None
         self.task_desc = None
         self.old_pos = None
         logging.info(f"NoiseActionEnv initialized: noise_dim={self.smolvla_wrapper.noise_dim}, "
@@ -217,9 +215,6 @@ class NoiseActionEnv(BaseCustomEnv):
         """環境をリセットし、初期状態特徴量を返す"""
         self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
         self.task_desc = self.genesis_env.get_task_description()
-        self.current_state_features = self.smolvla_wrapper.extract_state_features(
-            self.current_obs, self.task_desc
-        )
         # StateObsEnv形式の観測を生成
         self.old_pos = None
         state_obs = self.make_obs(self.current_obs)
@@ -250,22 +245,18 @@ class NoiseActionEnv(BaseCustomEnv):
 
     def step(self, noise_action):
         noise_tensor = torch.from_numpy(noise_action).float().to(self.device)
-        # SmolVLAでアクションチャンクを生成
         action_chunk = self.smolvla_wrapper.generate_actions_from_noise(
-            self.current_state_features, noise_tensor, self.current_obs, self.task_desc
+            noise_tensor, self.current_obs, self.task_desc
         )
         # アクションチャンクを逐次実行
         total_reward = 0.0
         done = False
         info = {}
-        for action_idx in range(min(self.smolvla_wrapper.chunk_size, len(action_chunk))):
-            if done:
-                break
-            action = action_chunk[action_idx].cpu().numpy()
+        for action in action_chunk:
+            action = action.cpu().numpy()
             # GenesisEnvでアクションを実行
-            self.current_obs, reward, terminated, truncated, step_info = self.genesis_env.step(action)
-            total_reward += reward
-            self.reward = reward
+            self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
+            total_reward += self.reward
             done = terminated or truncated
             info.update(step_info)
             # Video frame recording
@@ -275,10 +266,6 @@ class NoiseActionEnv(BaseCustomEnv):
                     self.frames.append(frame)
             if done:
                 break
-        # 新しい状態特徴量を抽出（SmolVLA用）
-        self.current_state_features = self.smolvla_wrapper.extract_state_features(
-            self.current_obs, self.task_desc
-        )
         # StateObsEnv形式の観測を生成
         state_obs = self.make_obs(self.current_obs)
         return state_obs, total_reward, terminated, truncated, info
@@ -298,8 +285,8 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
         # Action space: ノイズ空間
         self.action_space = gym.spaces.Box(
-            low=-1.0, high=1.0, 
-            shape=(self.smolvla_wrapper.noise_dim,), 
+            low=-1.0, high=1.0,
+            shape=(self.smolvla_wrapper.noise_dim,),
             dtype=np.float32
         )
         # Observation space: リッチな状態特徴量
@@ -310,7 +297,6 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         )
         # Internal state
         self.current_obs = None
-        self.current_state_features = None
         self.task_desc = None
         logging.info(f"NoiseActionVisualEnv initialized: noise_dim={self.smolvla_wrapper.noise_dim}, "
                     f"state_dim={self.smolvla_wrapper.total_state_dim}, "
@@ -320,12 +306,11 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         """環境をリセットし、初期状態特徴量を返す"""
         self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
         self.task_desc = self.genesis_env.get_task_description()
-        self.current_state_features = self.smolvla_wrapper.extract_state_features(
-            self.current_obs, self.task_desc
-        )
         self.frames = []
         self.reward = 0.0
-        state_features_np = self.current_state_features.cpu().numpy()
+        state_features_np = self.smolvla_wrapper.extract_state_features(
+            self.current_obs, self.task_desc
+        ).cpu().numpy()
         if self.record_video:
             frame = self.render_frame()
             if frame is not None:
@@ -336,20 +321,17 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         noise_tensor = torch.from_numpy(noise_action).float().to(self.device)
         # SmolVLAでアクションチャンクを生成
         action_chunk = self.smolvla_wrapper.generate_actions_from_noise(
-            self.current_state_features, noise_tensor, self.current_obs, self.task_desc
+            noise_tensor, self.current_obs, self.task_desc
         )
         # アクションチャンクを逐次実行
         total_reward = 0.0
         done = False
         info = {}
-        for action_idx in range(min(self.smolvla_wrapper.chunk_size, len(action_chunk))):
-            action = action_chunk[action_idx]
-            if isinstance(action, torch.Tensor):
-                action = action.cpu().numpy()
+        for action in action_chunk:
+            action = action.cpu().numpy()
             # GenesisEnvでアクションを実行
-            self.current_obs, reward, terminated, truncated, step_info = self.genesis_env.step(action)
-            total_reward += reward
-            self.reward = reward
+            self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
+            total_reward += self.reward
             done = terminated or truncated
             info.update(step_info)
             # Video frame recording
@@ -359,10 +341,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                     self.frames.append(frame)
             if done:
                 break
-        # 新しい状態特徴量を抽出
-        self.current_state_features = self.smolvla_wrapper.extract_state_features(
+        next_state_features_np = self.smolvla_wrapper.extract_state_features(
             self.current_obs, self.task_desc
-        )
-        # tianshouのために状態特徴量をnumpy配列に変換
-        next_state_features_np = self.current_state_features.cpu().numpy()
+        ).cpu().numpy()
         return next_state_features_np, total_reward, terminated, truncated, info
