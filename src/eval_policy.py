@@ -4,12 +4,10 @@ import imageio
 import numpy as np
 import torch
 import genesis as gs
-from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.common.policies.act.modeling_act import ACTPolicy
-from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
-from lerobot.common.policies.tdmpc.modeling_tdmpc import TDMPCPolicy
-from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
-from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.src.lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.src.lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.src.lerobot.policies.pi0.modeling_pi0 import PI0Policy
+from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +43,7 @@ def process_image_for_video(image_array, target_height, target_width):
     return image_array
 
 def main(training_name, observation_height, observation_width, episode_num, show_viewer, checkpoint_step="last"):
-    policy_list = ["act", "diffusion", "pi0", "tdmpc", "vqbet", "smolvla"]
+    policy_list = ["act", "diffusion", "pi0", "smolvla"]
     task_list = ["test", "simple_pick"]
     output_directory = Path(f"outputs/eval/{training_name}_{checkpoint_step}")
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -68,10 +66,6 @@ def main(training_name, observation_height, observation_width, episode_num, show
         policy = DiffusionPolicy.from_pretrained(pretrained_policy_path)
     elif model_type == "act":
         policy = ACTPolicy.from_pretrained(pretrained_policy_path)
-    elif model_type == "vqbet":
-        policy = VQBeTPolicy.from_pretrained(pretrained_policy_path)
-    elif model_type == "tdmpc":
-        policy = TDMPCPolicy.from_pretrained(pretrained_policy_path)
     elif model_type == "pi0":
         policy = PI0Policy.from_pretrained(pretrained_policy_path)
     elif model_type == "smolvla":
@@ -244,8 +238,8 @@ def main(training_name, observation_height, observation_width, episode_num, show
 
 if __name__ == "__main__":
     training_name = "smolvla_simple_pick"
-    observation_height = 512 # 480
-    observation_width = 512 # 640
+    observation_height = 512
+    observation_width = 512
     episode_num = 5
     show_viewer = False
     checkpoint_step = "060000"

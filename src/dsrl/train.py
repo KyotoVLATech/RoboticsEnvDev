@@ -298,7 +298,7 @@ if __name__ == "__main__":
         'algorithm': algorithm,
 
         # Environment settings
-        'task': task,  # タスク名（例: 'pendulum', 'simple_pick', 'vla_pick', 'vla_visual_pick'）
+        'task': task,
         'observation_height': 512, # 観測画像の高さ（基本的に変更不要）
         'observation_width': 512,  # 観測画像の幅（基本的に変更不要）
         'show_viewer': False, # TrueでGenesisのViewerを表示
@@ -310,9 +310,6 @@ if __name__ == "__main__":
         'batch_size': 64,  # 256 バッチサイズ
         'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
         'repeat_per_collect': 10,  # 1回の収集ごとのネットワーク更新回数（On-policy用）
-
-        # PPOにおける学習ステップの計算
-        # max_epoch * (step_per_collect / batch_size) * repeat_per_collect
 
         # Network settings
         'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
@@ -335,26 +332,23 @@ if __name__ == "__main__":
         'value_clip': True,  # 価値関数のクリッピング有無（PPO用）
         'advantage_normalization': True,  # アドバンテージ正規化の有無（PPO用）
 
-        # DSRL settings
-        'chunk_size': 50,  # DSRLで1チャンクに含めるステップ数
-
         # Logging and saving
         'use_wandb': True,  # WandBによるロギングを有効化
-        'wandb_project': 'smolvla',  # WandBプロジェクト名
-        'wandb_run_name': None,  # WandBラン名（Noneなら自動生成）
+        'wandb_project': 'smolvla', # プロジェクト名
+        'wandb_run_name': None, # Noneなら自動生成
         'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_0',  # チェックポイント保存ディレクトリ
-        'resume_from_log': False,  # ログから学習を再開するか
-        'log_per_epoch': 1,  # 何エポックごとにログを記録するか
-        'save_checkpoint_interval': 100,  # 何エポックごとにチェックポイントを保存するか（1なら毎エポック）
+        'resume_from_log': False,  # ログから学習を再開するか（Trueの動作未確認
+        'log_per_epoch': 1, # 何エポックごとにログを記録するか
+        'save_checkpoint_interval': 100, # 何エポックごとにチェックポイントを保存するか
 
         # Video recording settings
-        'record_video': True,  # 学習中の動画記録を有効化
+        'record_video': True,  # 学習中の動画記録を有効化（pendulumなら自動で無効化）
         'video_record_interval': 50,  # 何エポックごとに動画を記録するか
 
         # SmolVLA settings
         'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
         'smolvla_config_overrides': {  # SmolVLAの設定上書き
-            'n_action_steps': 10,  # 1エピソード内のアクションステップ数
+            'n_action_steps': 10,  # 生成したaction chunkの内，何ステップを使用するか
         }
     }
 

@@ -1,7 +1,6 @@
 # data
 datasets/
 dataset/
-URDF/
 
 # cache
 __pycache__/

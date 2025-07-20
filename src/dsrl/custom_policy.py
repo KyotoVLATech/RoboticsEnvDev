@@ -1,12 +1,8 @@
-import os
-import sys
 import logging
 from typing import Dict, Optional
 import numpy as np
 import torch
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
 class SmolVLAWrapper:
     """

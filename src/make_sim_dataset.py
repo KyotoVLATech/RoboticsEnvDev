@@ -1,11 +1,10 @@
-import genesis as gs
 import numpy as np
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.genesis_env import GenesisEnv
 from env.tasks.test import joints_name
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.src.lerobot.datasets.lerobot_dataset import LeRobotDataset
 import os
 import numpy as np
 from PIL import Image

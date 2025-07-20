@@ -10,7 +10,7 @@ import wandb
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from env.genesis_env import GenesisEnv
-from src.dsrl.dsrl import SmolVLAWrapper, load_smolvla_model
+from src.dsrl.custom_policy import SmolVLAWrapper, load_smolvla_model
 
 class BaseCustomEnv(gym.Env):
     """

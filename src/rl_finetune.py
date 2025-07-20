@@ -1,17 +1,12 @@
-"""PPO training for SmolVLA policy."""
-
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
 import logging
 from pathlib import Path
 import torch
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from env.genesis_env import GenesisEnv
-from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from src.rl_agent import SmolVLAPolicyWrapper, PPOTrainer
 
 
