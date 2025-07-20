@@ -78,8 +78,7 @@ class SmolVLAWrapper:
             if latent_noise.dim() == 1:
                 latent_noise = latent_noise.unsqueeze(0)  # バッチ次元を追加
             # (batch_size, 1, noise_dim) -> (batch_size, chunk_size, noise_dim)
-            noise_chunk = None
-            # noise_chunk = latent_noise.unsqueeze(1).repeat(1, self.chunk_size, 1)
+            noise_chunk = latent_noise.unsqueeze(1).repeat(1, self.chunk_size, 1)
             actions = self.smolvla_policy._get_action_chunk(batch, noise_chunk)
             return actions.squeeze(0)  # バッチ次元を除去
 
