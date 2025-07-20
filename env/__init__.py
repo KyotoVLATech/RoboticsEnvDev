@@ -1,4 +1,4 @@
-from lerobot.common.envs import EnvConfig
+from lerobot.envs import EnvConfig
 from dataclasses import dataclass
 
 @EnvConfig.register_subclass("test")

@@ -4,10 +4,10 @@ import imageio
 import numpy as np
 import torch
 import genesis as gs
-from lerobot.src.lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.src.lerobot.policies.act.modeling_act import ACTPolicy
-from lerobot.src.lerobot.policies.pi0.modeling_pi0 import PI0Policy
-from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

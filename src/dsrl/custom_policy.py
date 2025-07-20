@@ -2,7 +2,8 @@ import logging
 from typing import Dict, Optional
 import numpy as np
 import torch
-from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.factory import get_policy_class
 
 class SmolVLAWrapper:
     """
@@ -199,13 +200,8 @@ def load_smolvla_model(model_path: Optional[str] = None, config_overrides: Optio
         SmolVLAPolicy: SmolVLAポリシー
     """
     config_overrides = config_overrides or {}
-    # lerobot/common/policies/factory.pyの実装を参考にした読み込み
-    from lerobot.common.policies.factory import get_policy_class
-    # SmolVLAPolicyクラスを取得
     policy_cls = get_policy_class("smolvla")
-    # 事前学習済みモデルを読み込み
     policy = policy_cls.from_pretrained(model_path)
-    # コンフィグをオーバーライド
     for key, value in config_overrides.items():
         setattr(policy.config, key, value)
     logging.info(f"Loaded SmolVLA model from {model_path} with overrides.")

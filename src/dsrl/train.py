@@ -158,35 +158,21 @@ def make_env(config: Dict):
 def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     """学習中の動画を記録してWandBにアップロード"""
     actual_env : BaseCustomEnv = env.workers[0].env
-    # 環境をリセット（VectorEnvの場合）
-    obs = env.reset()
-    frames = []
+    actual_env.start_video_recording()
+    obs, _ = actual_env.reset()
     done = False
     episode_length = 0
-    max_steps = getattr(actual_env, 'max_episode_steps', 100)
-    device = config.get('device', 'cuda')
-
-    while not done and episode_length < max_steps:
-        frame = actual_env.render_frame_with_info()
-        if frame is not None:
-            frames.append(frame)
-        # アクションを選択（決定論的）
-        obs_array = obs[0]
+    while not done and episode_length < actual_env.max_episode_steps:
         with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs_array).unsqueeze(0).to(device)
             # PPOのactorの出力: ((mean, std), None)
-            actor_output = policy.actor(obs_tensor)
-            # 最初の要素から平均を取得
-            mean_std_tuple = actor_output[0]
-            mean_tensor = mean_std_tuple[0]  # 平均テンソル
-            # 決定論的アクションとして平均を使用
-            action = mean_tensor.cpu().numpy()[0]  # バッチ次元を削除
+            action = policy.actor(obs)[0][0].cpu().numpy()[0]
         # 環境をステップ実行
-        obs, reward, terminated, truncated, info = env.step(np.array([action]))
-        episode_length += 1
-        done = terminated[0] or truncated[0]
-    # 動画をアップロード
-    actual_env.upload_video_to_wandb(frames, epoch)
+        obs, _, terminated, truncated, _ = actual_env.step(action)
+        episode_length += 1 * getattr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
+        done = terminated or truncated
+    frames = actual_env.stop_video_recording()
+    if frames:
+        actual_env.upload_video_to_wandb(frames)
 
 def save_checkpoint(policy, epoch: int, checkpoint_dir: str):
     """チェックポイントを保存し、ファイルパスを返す"""

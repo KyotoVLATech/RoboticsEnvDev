@@ -33,6 +33,7 @@
         "note": "Information"
     },
     "python.analysis.extraPaths": [
-        "./Genesis"
+        "./Genesis",
+        "./lerobot/src"
     ]
 }

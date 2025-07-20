@@ -2,8 +2,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import torch.distributions as dist
-from lerobot.src.lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.src.lerobot.constants import ACTION
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.constants import ACTION
 import numpy as np
 import wandb
 from typing import Dict, List, Tuple, Optional
