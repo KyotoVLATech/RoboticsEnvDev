@@ -217,13 +217,13 @@ def main(config: Dict):
     if config['algorithm'].lower() in ['sac', 'ddpg', 'td3']:
         buffer = VectorReplayBuffer(
             config.get('buffer_size', 100000),
-            config.get('train_num', 1)
+            1
         )
     else:
         # On-policy algorithms don't need a replay buffer in the same way
         buffer = VectorReplayBuffer(
             config.get('step_per_collect', 2048),
-            config.get('train_num', 1)
+            1
         )
     # Collectors
     train_collector = Collector(
@@ -236,25 +236,19 @@ def main(config: Dict):
     writer = SummaryWriter(str(log_path))
     if config.get('use_wandb', True):
         # wandb.initは既に行われているので、引数なしでWandbLoggerを初期化
-        logger = WandbLogger(test_interval=config.get('log_per_epoch', 1))
+        train_interval = config.get('log_per_epoch', 1) * config.get('step_per_epoch', 2048)
+        update_interval = config.get('log_per_epoch', 1) * np.ceil(config.get('step_per_epoch', 300) / config.get('step_per_collect', 300)) * config.get('repeat_per_collect', 10) * np.ceil(config.get('step_per_collect', 300) / config.get('batch_size', 64))
+        save_interval = config.get('save_checkpoint_interval', 50)
+        logger = WandbLogger(train_interval=train_interval, update_interval=update_interval, save_interval=save_interval)
         logger.load(writer)
     else:
         logger = TensorboardLogger(writer)
     config['logger'] = logger
 
-    # Checkpoint function with configurable save interval
     def save_fn(epoch, env_step, gradient_step):
-        save_interval = config.get('save_checkpoint_interval', 1)  # Default: save every epoch
-        if epoch % save_interval == 0:
-            path = save_checkpoint(policy, epoch, config['checkpoint_dir'])
-            logging.info(f"Checkpoint saved at epoch {epoch} (interval: {save_interval})")
-            return path
-        # Noneの代わりにダミーファイルを返す
-        dummy_path = Path(config['checkpoint_dir']) / "dummy.pth"
-        if not dummy_path.exists():
-            dummy_path.parent.mkdir(parents=True, exist_ok=True)
-            dummy_path.touch()
-        return str(dummy_path)
+        path = save_checkpoint(policy, epoch, config['checkpoint_dir'])
+        logging.info(f"Checkpoint saved at epoch {epoch}")
+        return path
 
     config['save_checkpoint_fn'] = save_fn
     # Training with unified trainer
@@ -280,7 +274,7 @@ if __name__ == "__main__":
     # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
     # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
     # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
-    task = 'vla_pick'
+    task = 'vla_visual_pick'
     algorithm = 'ppo'  # 使用する強化学習アルゴリズム（'sac' または 'ppo'）
 
     # Configuration
@@ -295,10 +289,10 @@ if __name__ == "__main__":
         'show_viewer': False, # TrueでGenesisのViewerを表示
 
         # Training settings
-        'max_epoch': 1000,  # 学習エポック数
-        'step_per_epoch': 1000, # 4096 1エポックあたりの学習ステップ数 PPOならstep_per_collectと同じにする
-        'step_per_collect': 1000, # 1回の収集で環境から集めるデータのステップ数
-        'batch_size': 64,  # 256 バッチサイズ
+        'max_epoch': 3000,  # 学習エポック数
+        'step_per_epoch': 1200, # 1エポックあたりに収集するデータのステップ数．1エポックのupdate回数は step_per_epoch * repeat_per_collect / batch_size
+        'step_per_collect': 1200, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
+        'batch_size': 100,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的
         'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
         'repeat_per_collect': 10,  # 1回の収集ごとのネットワーク更新回数（On-policy用）
 
@@ -327,14 +321,14 @@ if __name__ == "__main__":
         'use_wandb': True,  # WandBによるロギングを有効化
         'wandb_project': 'smolvla', # プロジェクト名
         'wandb_run_name': None, # Noneなら自動生成
-        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_0',  # チェックポイント保存ディレクトリ
+        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_1',  # チェックポイント保存ディレクトリ
         'resume_from_log': False,  # ログから学習を再開するか（Trueの動作未確認
         'log_per_epoch': 1, # 何エポックごとにログを記録するか
-        'save_checkpoint_interval': 100, # 何エポックごとにチェックポイントを保存するか
+        'save_checkpoint_interval': 10, # 何エポックごとにチェックポイントを保存するか
 
         # Video recording settings
         'record_video': True,  # 学習中の動画記録を有効化（pendulumなら自動で無効化）
-        'video_record_interval': 50,  # 何エポックごとに動画を記録するか
+        'video_record_interval': 5,  # 何エポックごとに動画を記録するか
 
         # SmolVLA settings
         'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス

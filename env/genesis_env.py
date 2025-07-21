@@ -25,7 +25,7 @@ class GenesisEnv(gym.Env):
         self._env = self._make_env_task()
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
-        self._max_episode_steps = 500
+        self._max_episode_steps = 500 if self.task == "test" else 300
         self.step_count = 0
         self.reset_freq = reset_freq
         self.episode_count = 0
