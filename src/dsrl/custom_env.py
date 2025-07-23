@@ -204,6 +204,7 @@ class NoiseActionEnv(BaseCustomEnv):
             low=-np.inf, high=np.inf,
             shape=(21,), dtype=np.float32
         )
+        self.n_action_steps = self.smolvla_wrapper.smolvla_policy.config.n_action_steps
         # Internal state
         self.current_obs = None
         self.task_desc = None
@@ -252,8 +253,8 @@ class NoiseActionEnv(BaseCustomEnv):
         total_reward = 0.0
         done = False
         info = {}
-        for action in action_chunk:
-            action = action.cpu().numpy()
+        for i in range(self.n_action_steps):
+            action = action_chunk[i].cpu().numpy()
             # GenesisEnvでアクションを実行
             self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
             total_reward += self.reward
@@ -295,6 +296,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
             shape=(self.smolvla_wrapper.total_state_dim,),
             dtype=np.float32
         )
+        self.n_action_steps = self.smolvla_wrapper.smolvla_policy.config.n_action_steps
         # Internal state
         self.current_obs = None
         self.task_desc = None
@@ -327,8 +329,8 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         total_reward = 0.0
         done = False
         info = {}
-        for action in action_chunk:
-            action = action.cpu().numpy()
+        for i in range(self.n_action_steps):
+            action = action_chunk[i].cpu().numpy()
             # GenesisEnvでアクションを実行
             self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
             total_reward += self.reward
