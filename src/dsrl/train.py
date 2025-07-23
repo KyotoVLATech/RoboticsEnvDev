@@ -321,7 +321,7 @@ if __name__ == "__main__":
         'use_wandb': True,  # WandBによるロギングを有効化
         'wandb_project': 'smolvla', # プロジェクト名
         'wandb_run_name': None, # Noneなら自動生成
-        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_1',  # チェックポイント保存ディレクトリ
+        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_2',  # チェックポイント保存ディレクトリ
         'resume_from_log': False,  # ログから学習を再開するか（Trueの動作未確認
         'log_per_epoch': 1, # 何エポックごとにログを記録するか
         'save_checkpoint_interval': 10, # 何エポックごとにチェックポイントを保存するか

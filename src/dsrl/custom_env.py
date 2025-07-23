@@ -308,7 +308,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         self.task_desc = self.genesis_env.get_task_description()
         self.frames = []
         self.reward = 0.0
-        state_features_np = self.smolvla_wrapper.extract_state_features(
+        state_features_np = self.smolvla_wrapper.extract_features(
             self.current_obs, self.task_desc
         ).cpu().numpy()
         if self.record_video:
@@ -341,7 +341,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                     self.frames.append(frame)
             if done:
                 break
-        next_state_features_np = self.smolvla_wrapper.extract_state_features(
+        next_state_features_np = self.smolvla_wrapper.extract_features(
             self.current_obs, self.task_desc
         ).cpu().numpy()
         return next_state_features_np, total_reward, terminated, truncated, info
