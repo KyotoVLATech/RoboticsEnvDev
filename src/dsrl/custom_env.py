@@ -290,7 +290,6 @@ class NoiseActionVisualEnv(BaseCustomEnv):
             shape=(self.smolvla_wrapper.noise_dim,),
             dtype=np.float32
         )
-        # Observation space: リッチな状態特徴量
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf,
             shape=(self.smolvla_wrapper.total_state_dim,),
@@ -310,14 +309,13 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         self.task_desc = self.genesis_env.get_task_description()
         self.frames = []
         self.reward = 0.0
-        state_features_np = self.smolvla_wrapper.extract_features(
-            self.current_obs, self.task_desc
-        ).cpu().numpy()
+        # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
+        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
         if self.record_video:
             frame = self.render_frame()
             if frame is not None:
                 self.frames.append(frame)
-        return state_features_np, info
+        return state_features, info
 
     def step(self, noise_action):
         noise_tensor = torch.from_numpy(noise_action).float().to(self.device)
@@ -343,7 +341,6 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                     self.frames.append(frame)
             if done:
                 break
-        next_state_features_np = self.smolvla_wrapper.extract_features(
-            self.current_obs, self.task_desc
-        ).cpu().numpy()
-        return next_state_features_np, total_reward, terminated, truncated, info
+        # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
+        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        return state_features, total_reward, terminated, truncated, info

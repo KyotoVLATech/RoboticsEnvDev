@@ -24,8 +24,15 @@ class SmolVLAWrapper:
         self.chunk_size = self.smolvla_policy.config.chunk_size
         self.noise_dim = self.smolvla_policy.config.max_action_dim
         # VLMの隠れ状態次元を取得
-        proprioceptive_dim = self.smolvla_policy.config.max_state_dim
-        self.total_state_dim = proprioceptive_dim + 720 + 2 * 960
+        self.proprioceptive_dim = self.smolvla_policy.config.max_state_dim
+        self.vlm_dim = 720
+        # 画像サイズを計算（512x512x3の画像2枚）
+        self.img_height = 512
+        self.img_width = 512
+        self.img_channels = 3
+        self.front_img_size = self.img_height * self.img_width * self.img_channels
+        self.side_img_size = self.img_height * self.img_width * self.img_channels
+        self.total_state_dim = self.front_img_size + self.side_img_size + self.vlm_dim + self.proprioceptive_dim
         self.actions = torch.zeros((1, self.chunk_size, self.noise_dim), device=self.device)
 
     def generate_actions_from_noise(self, latent_noise: torch.Tensor, obs: Dict, task_desc: str) -> torch.Tensor:
@@ -56,24 +63,28 @@ class SmolVLAWrapper:
             obs: 環境からの観測
             task_desc: タスク記述
         Returns:
-            torch.Tensor: 統合された状態特徴量
+            torch.Tensor: 統合された状態特徴量（画像データ、VLM特徴量、自己受容状態を含む）
         """
         with torch.no_grad():
             batch = self._prepare_batch(obs, task_desc)
             # 1. 自己受容状態（proprioceptive state）の取得
             proprioceptive_state = self.smolvla_policy.prepare_state(batch)  # (1, state_dim)
-            # proprioceptive state shape: [1, 32]
-            # 2. 視覚特徴量の抽出
-            visual_features = self._extract_vision_features(batch)
-            # visual features shape: [1, 2 * 960]
-            # 3. vlm特徴量の抽出
+            # 2. VLM特徴量の抽出
             vlm_features = self._extract_vlm_features(batch)
-            # vlm features shape: [1, 720]
-            # 4. 全ての特徴量を結合
+            # 3. 画像データの取得（平坦化）
+            front_img = batch["observation.images.front"].cpu().numpy()[0]  # (3, H, W)
+            side_img = batch["observation.images.side"].cpu().numpy()[0]   # (3, H, W)
+            # 画像を平坦化
+            front_img_flat = front_img.flatten()
+            side_img_flat = side_img.flatten()
+            # 画像データ（平坦化）+ VLM特徴量 + 自己受容状態
+            front_img_tensor = torch.from_numpy(front_img_flat).float().unsqueeze(0)
+            side_img_tensor = torch.from_numpy(side_img_flat).float().unsqueeze(0)
             state_features = torch.cat([
-                proprioceptive_state,
-                visual_features,
-                vlm_features
+                front_img_tensor,
+                side_img_tensor,
+                vlm_features.cpu(),
+                proprioceptive_state.cpu()
             ], dim=1)
             return state_features
 

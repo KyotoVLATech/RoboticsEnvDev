@@ -37,7 +37,7 @@ class DSRLTrainer(BaseTrainer):
         self.last_video_epoch = 0
         # Validate algorithm
         off_policy_algorithms = ['sac', 'dqn', 'ddpg', 'td3']
-        on_policy_algorithms = ['ppo', 'a2c', 'trpo']
+        on_policy_algorithms = ['ppo', 'a2c', 'trpo', 'vision_ppo']
         if self.algorithm not in off_policy_algorithms + on_policy_algorithms:
             raise ValueError(f"Unsupported algorithm: {self.algorithm}.\nSupported: {off_policy_algorithms + on_policy_algorithms}")
         self.is_off_policy = self.algorithm in off_policy_algorithms
@@ -115,6 +115,7 @@ def create_dsrl_trainer(
     """
     # Set algorithm-specific defaults
     off_policy_algorithms = ['sac', 'dqn', 'ddpg', 'td3']
+    on_policy_algorithms = ['ppo', 'a2c', 'trpo', 'vision_ppo']
     if algorithm.lower() in off_policy_algorithms:
         # Off-policy specific parameters
         trainer_kwargs = {

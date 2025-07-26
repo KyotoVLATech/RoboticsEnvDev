@@ -16,6 +16,7 @@ from tianshou.utils import TensorboardLogger, WandbLogger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv
 from src.dsrl.custom_trainer import dsrl_trainer
+from src.dsrl.feature_cnn import FeatureCNN, VisionNet
 
 def create_sac_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
     """SAC用のアクター・クリティックネットワークを作成"""
@@ -52,6 +53,30 @@ def create_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, 
     # Critic network
     net_c = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
     critic = Critic(net_c, device=device).to(device)
+    return actor, critic
+
+def create_vision_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, feature_dim: int = 128, device: str = "cuda"):
+    """
+    画像＋VLM＋自己受容状態対応PPOネットワークを作成
+    state_dimは実際には使用されず、VisionNetが動的に次元を計算する
+    """
+    shared_cnn = FeatureCNN(in_channels=3, feature_dim=feature_dim).to(device)
+    
+    # VisionNetの出力次元を計算
+    # CNN特徴量 + VLM特徴量 + 自己受容状態
+    vlm_dim = 720
+    proprioceptive_dim = 32
+    combined_feature_dim = feature_dim + vlm_dim + proprioceptive_dim
+    
+    net_a = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
+    vision_net_a = VisionNet(shared_cnn, net_a, device)
+    actor = ActorProb(
+        vision_net_a, action_dim, max_action=1.0, device=device,
+        unbounded=True, conditioned_sigma=True
+    ).to(device)
+    net_c = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
+    vision_net_c = VisionNet(shared_cnn, net_c, device)
+    critic = Critic(vision_net_c, device=device).to(device)
     return actor, critic
 
 def create_sac_policy(actor, critic1, critic2, config: Dict, device: str = "cuda"):
@@ -134,6 +159,9 @@ def create_policy(algorithm: str, state_dim: int, action_dim: int, config: Dict,
     elif algorithm == 'ppo':
         actor, critic = create_ppo_networks(state_dim, action_dim, hidden_dim, device)
         return create_ppo_policy(actor, critic, config, device)
+    elif algorithm == 'vision_ppo':
+        actor, critic = create_vision_ppo_networks(state_dim, action_dim, hidden_dim, feature_dim=config.get('cnn_feature_dim', 128), device=device)
+        return create_ppo_policy(actor, critic, config, device)
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
 
@@ -170,6 +198,7 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     episode_length = 0
     while not done and episode_length < actual_env.max_episode_steps:
         with torch.no_grad():
+            # 全てベクトル形式の観測として処理
             action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))[0][0].cpu().numpy()[0]
         # 環境をステップ実行
         obs, _, terminated, truncated, _ = actual_env.step(action)
@@ -275,7 +304,10 @@ if __name__ == "__main__":
     # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
     # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
     task = 'vla_visual_pick'
-    algorithm = 'ppo'  # 使用する強化学習アルゴリズム（'sac' または 'ppo'）
+    algorithm = 'vision_ppo'
+
+    if task == 'vla_visual_pick':
+        algorithm = 'vision_ppo'
 
     # Configuration
     config = {
@@ -316,6 +348,9 @@ if __name__ == "__main__":
         'eps_clip': 0.2,  # クリッピング範囲（PPO用）
         'value_clip': True,  # 価値関数のクリッピング有無（PPO用）
         'advantage_normalization': True,  # アドバンテージ正規化の有無（PPO用）
+
+        # CNN
+        'cnn_feature_dim': 128,  # CNNの出力特徴量次元（Vision PPO用）
 
         # Logging and saving
         'use_wandb': True,  # WandBによるロギングを有効化
