@@ -363,7 +363,7 @@ if __name__ == "__main__":
 
         # Video recording settings
         'record_video': True,  # 学習中の動画記録を有効化（pendulumなら自動で無効化）
-        'video_record_interval': 5,  # 何エポックごとに動画を記録するか
+        'video_record_interval': 10,  # 何エポックごとに動画を記録するか
 
         # SmolVLA settings
         'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス

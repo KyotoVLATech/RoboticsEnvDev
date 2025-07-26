@@ -48,7 +48,10 @@ class VisionNet(torch.nn.Module):
         self.proprioceptive_dim = 32  # SmolVLAの自己受容状態次元
 
     def forward(self, obs, state=None, info={}):
-        obs_tensor = torch.from_numpy(obs).float().to(self.device).squeeze(0)
+        if isinstance(obs, np.ndarray):
+            obs_tensor = torch.from_numpy(obs).float().to(self.device)
+        elif isinstance(obs, torch.Tensor):
+            obs_tensor = obs.float().to(self.device)
         # 統合ベクトルから各要素を分離: front_img + side_img + vlm_features + proprioceptive_state
         front_img_flat = obs_tensor[:, :self.front_img_size]
         side_img_flat = obs_tensor[:, self.front_img_size:self.front_img_size + self.side_img_size]

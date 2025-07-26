@@ -86,7 +86,7 @@ class SmolVLAWrapper:
                 vlm_features.cpu(),
                 proprioceptive_state.cpu()
             ], dim=1)
-            return state_features
+            return state_features.squeeze(0)  # バッチ次元を除去
 
     def _extract_vlm_features(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """SmolVLAのVLMの最終トークンから特徴量を取得"""
