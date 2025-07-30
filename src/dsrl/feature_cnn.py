@@ -4,47 +4,76 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class ResidualBlock(nn.Module):
+    """
+    残差ブロック
+    """
     def __init__(self, channels):
         super().__init__()
-        self.conv1 = nn.Conv2D(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2D(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
+
     def forward(self, x):
         residual = x
         x = F.relu(self.bn1(self.conv1(x)))
-        x += residual
+        x = self.bn2(self.conv2(x))
+        x += residual # 残差接続
+        x = F.relu(x)
+        return x
 
 class FeatureCNN(nn.Module):
     """
+    推奨するResNet風の画像特徴抽出CNN
     入力: (B, C, H, W)
     出力: (B, feature_dim)
     """
-    def __init__(self, in_channels=3, feature_dim=512):
+    def __init__(self, in_channels=3, feature_dim=256):
         super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
-            nn.ReLU(True),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(True),
-            nn.Flatten(),
-        )
+        # 畳み込み層の定義
+        self.conv1 = self._make_downsample_block(in_channels, 64) # H, W -> H/2, W/2
+        self.conv2 = self._make_downsample_block(64, 128)         # -> H/4, W/4
+        self.conv3 = self._make_downsample_block(128, 256)        # -> H/8, W/8
+        self.conv4 = self._make_downsample_block(256, 256)        # -> H/16, W/16
+
+        # 残差ブロック
+        self.resblock1 = ResidualBlock(256)
+        self.resblock2 = ResidualBlock(256)
+
+        # 空間次元を要約し、最終的な特徴ベクトルに変換
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(256, feature_dim)
 
-    def _make_conv_block(self, in_channels, out_channels):
+    def _make_downsample_block(self, in_channels, out_channels):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
-        x = self.cnn(x)
-        print("CNN output shape:", x.shape)  # デバッグ用
+        # 畳み込みでダウンサンプリング
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        
+        # 残差ブロックで特徴を洗練
+        x = self.resblock1(x)
+        x = self.resblock2(x)
+        
+        # Global Average Poolingで空間情報を要約
+        x = self.global_avg_pool(x)
+        
+        # フラット化して全結合層に入力
+        x = x.view(x.size(0), -1) # (B, 256, 1, 1) -> (B, 256)
         x = self.fc(x)
+        
         return x
 
 class VisionNet(torch.nn.Module):
@@ -75,11 +104,8 @@ class VisionNet(torch.nn.Module):
         front_img_flat = obs_tensor[:, :self.front_img_size]
         side_img_flat = obs_tensor[:, self.front_img_size:self.front_img_size + self.side_img_size]
         vlm_features = obs_tensor[:, self.front_img_size + self.side_img_size:self.front_img_size + self.side_img_size + self.vlm_dim]
-        proprioceptive_state = obs_tensor[:, self.front_img_size + self.side_img_size + self.vlm_dim:]
-        print("vlm features max:", vlm_features.max(), "min:", vlm_features.min()) # max 4.4 , min -4.5
-        print("proprioceptive state max:", proprioceptive_state.max(), "min:", proprioceptive_state.min()) # max 3.14, min, -0.35
-        # 正規化処理を入れた方が良い
-        
+        proprioceptive_state = obs_tensor[:, self.front_img_size + self.side_img_size + self.vlm_dim:-1]
+        task_id = obs_tensor[:, -1]  # 最後の要素はタスクID
         # 画像を元の形状に復元
         front_img = front_img_flat.view(-1, self.img_channels, self.img_height, self.img_width)
         side_img = side_img_flat.view(-1, self.img_channels, self.img_height, self.img_width)
@@ -93,8 +119,12 @@ class VisionNet(torch.nn.Module):
         self.save_img(concat_img)
         # CNN特徴量抽出
         cnn_feat = self.cnn(concat_img)
+        # proprioceptive_stateを正規化
+        proprioceptive_state /= np.pi
+        # vlm_featuresを正規化
+        vlm_features /= 5.0
         # 全ての特徴量を結合
-        combined_features = torch.cat([cnn_feat, vlm_features, proprioceptive_state], dim=1)
+        combined_features = torch.cat([cnn_feat, vlm_features, proprioceptive_state, task_id.unsqueeze(1)], dim=1)  # (B, feature_dim + vlm_dim + proprio_dim + 1)
         # MLPに通す
         output = self.net(combined_features)
         return output

@@ -361,10 +361,11 @@ class NoiseActionVisualEnv(BaseCustomEnv):
 
     def get_task_info(self):
         if 'green' in self.task_desc:
-            return 0.0
+            return -1.0
         elif 'red' in self.task_desc:
-            return 0.5
+            return 0.0
         elif 'blue' in self.task_desc:
             return 1.0
         else:
+            print(f"Unknown task description: {self.task_desc}", file=sys.stderr)
             return 0.0
