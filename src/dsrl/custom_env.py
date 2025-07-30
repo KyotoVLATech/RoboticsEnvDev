@@ -269,7 +269,8 @@ class NoiseActionEnv(BaseCustomEnv):
                 break
         # StateObsEnv形式の観測を生成
         state_obs = self.make_obs(self.current_obs)
-        return state_obs, total_reward, terminated, truncated, info
+        reward = total_reward / self.n_action_steps
+        return state_obs, reward, terminated, truncated, info
 
 class NoiseActionVisualEnv(BaseCustomEnv):
     """
@@ -311,6 +312,12 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         self.reward = 0.0
         # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
         state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        # 特徴量にタスク情報を追加
+        task_info = self.get_task_info()
+        state_features = torch.cat(
+            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
+            dim=0
+        )
         if self.record_video:
             frame = self.render_frame()
             if frame is not None:
@@ -343,4 +350,21 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                 break
         # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
         state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
-        return state_features, total_reward, terminated, truncated, info
+        # 特徴量にタスク情報を追加
+        task_info = self.get_task_info()
+        state_features = torch.cat(
+            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
+            dim=0
+        )
+        reward = total_reward / self.n_action_steps
+        return state_features, reward, terminated, truncated, info
+
+    def get_task_info(self):
+        if 'green' in self.task_desc:
+            return 0.0
+        elif 'red' in self.task_desc:
+            return 0.5
+        elif 'blue' in self.task_desc:
+            return 1.0
+        else:
+            return 0.0

@@ -66,25 +66,26 @@ def create_vision_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int 
     # CNN特徴量 + VLM特徴量 + 自己受容状態
     vlm_dim = 720
     proprioceptive_dim = 32
-    combined_feature_dim = feature_dim + vlm_dim + proprioceptive_dim
-    
+    task_info_dim = 1  # タスク情報の次元
+    combined_feature_dim = feature_dim + vlm_dim + proprioceptive_dim + task_info_dim
+
     net_a = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    vision_net_a = VisionNet(shared_cnn, net_a, device)
+    vision_net_a = VisionNet(shared_cnn, net_a, vlm_dim, device)
     actor = ActorProb(
         vision_net_a, action_dim, max_action=1.0, device=device,
         unbounded=True, conditioned_sigma=True
     ).to(device)
     net_c = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    vision_net_c = VisionNet(shared_cnn, net_c, device)
+    vision_net_c = VisionNet(shared_cnn, net_c, vlm_dim, device)
     critic = Critic(vision_net_c, device=device).to(device)
     return actor, critic
 
 def create_sac_policy(actor, critic1, critic2, config: Dict, device: str = "cuda"):
     """SAC Policyを作成"""
     # Optimizers
-    optim_actor = torch.optim.Adam(actor.parameters(), lr=config.get('learning_rate', 3e-4))
-    optim_critic1 = torch.optim.Adam(critic1.parameters(), lr=config.get('learning_rate', 3e-4))
-    optim_critic2 = torch.optim.Adam(critic2.parameters(), lr=config.get('learning_rate', 3e-4))
+    optim_actor = torch.optim.AdamW(actor.parameters(), lr=config.get('learning_rate', 3e-4))
+    optim_critic1 = torch.optim.AdamW(critic1.parameters(), lr=config.get('learning_rate', 3e-4))
+    optim_critic2 = torch.optim.AdamW(critic2.parameters(), lr=config.get('learning_rate', 3e-4))
     # SAC Policy
     policy = SACPolicy(
         actor=actor,
@@ -106,8 +107,9 @@ def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
     """PPO Policyを作成"""
     
     # Optimizers
-    optim = torch.optim.Adam(
-        list(actor.parameters()) + list(critic.parameters()), 
+    params = list({p for p in list(actor.parameters()) + list(critic.parameters())}) # 重複を排除
+    optim = torch.optim.AdamW(
+        params,
         lr=config.get('learning_rate', 3e-4)
     )
     
@@ -336,21 +338,21 @@ if __name__ == "__main__":
         # Algorithm-specific hyperparameters
         # SAC
         'gamma': 0.99,  # 割引率（SAC/PPO共通）
-        'tau': 0.005,  # ターゲットネットワークのソフト更新率（SAC用）
-        'alpha': 0.2,  # エントロピー正則化係数（SAC用）
-        'estimation_step': 1,  # 状態価値推定のステップ数（SAC用）TD-N
+        'tau': 0.005,  # ターゲットネットワークのソフト更新率
+        'alpha': 0.2,  # エントロピー正則化係数
+        'estimation_step': 1,  # 状態価値推定のステップ数 TD-N
 
         # PPO
-        'gae_lambda': 0.95,  # GAEのλパラメータ（PPO用）
-        'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム（PPO用）
-        'vf_coef': 0.5,  # 価値関数損失の重み（PPO用）
-        'ent_coef': 0.01,  # エントロピー損失の重み（PPO用）
-        'eps_clip': 0.2,  # クリッピング範囲（PPO用）
-        'value_clip': True,  # 価値関数のクリッピング有無（PPO用）
-        'advantage_normalization': True,  # アドバンテージ正規化の有無（PPO用）
+        'gae_lambda': 0.95,  # GAEのλパラメータ
+        'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム
+        'vf_coef': 0.2,  # 価値関数損失の重み
+        'ent_coef': 0.005,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
+        'eps_clip': 0.2,  # クリッピング範囲
+        'value_clip': True,  # 価値関数のクリッピング有無
+        'advantage_normalization': True,  # アドバンテージ正規化の有無
 
         # CNN
-        'cnn_feature_dim': 128,  # CNNの出力特徴量次元（Vision PPO用）
+        'cnn_feature_dim': 256, # 128,  # CNNの出力特徴量次元（Vision PPO用）
 
         # Logging and saving
         'use_wandb': True,  # WandBによるロギングを有効化

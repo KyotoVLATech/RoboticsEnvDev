@@ -80,7 +80,7 @@ class DSRLTrainer(BaseTrainer):
             return result
         epoch, epoch_stat, info = result
         # Check if we should record video
-        if (self.video_record_interval > 0 and self.record_video_fn is not None and epoch % self.video_record_interval == 0 and epoch > self.last_video_epoch and self.train_envs is not None):
+        if (self.video_record_interval > 0 and self.record_video_fn is not None and epoch % self.video_record_interval == 1 and epoch > self.last_video_epoch and self.train_envs is not None):
             logging.info(f"Recording training video for epoch {epoch}")
             self.record_video_fn(self.train_envs, self.policy, self.config, epoch)
             self.last_video_epoch = epoch
