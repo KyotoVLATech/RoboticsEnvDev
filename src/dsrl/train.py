@@ -201,7 +201,10 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     while not done and episode_length < actual_env.max_episode_steps:
         with torch.no_grad():
             # 全てベクトル形式の観測として処理
-            action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))[0][0].cpu().numpy()[0]
+            action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))
+            action = action[0][0].cpu().numpy()
+            action = action[0]
+            print(f"Action min: {action.min()}, max: {action.max()}")
         # 環境をステップ実行
         obs, _, terminated, truncated, _ = actual_env.step(action)
         episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
@@ -328,16 +331,16 @@ if __name__ == "__main__":
         'step_per_collect': 1200, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
         'batch_size': 100,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的
         'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
-        'repeat_per_collect': 10,  # 1回の収集ごとのネットワーク更新回数（On-policy用）
+        'repeat_per_collect': 10,  # 10 1回の収集ごとのネットワーク更新回数（On-policy用）
 
         # Network settings
         'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
-        'learning_rate': 3e-4,  # 学習率
+        'learning_rate': 3e-4,  # 学習率 3e-4
         'buffer_size': 100000,  # リプレイバッファのサイズ
 
         # Algorithm-specific hyperparameters
         # SAC
-        'gamma': 0.99,  # 割引率（SAC/PPO共通）
+        'gamma': 0.97,  # 割引率（SAC/PPO共通）
         'tau': 0.005,  # ターゲットネットワークのソフト更新率
         'alpha': 0.2,  # エントロピー正則化係数
         'estimation_step': 1,  # 状態価値推定のステップ数 TD-N
@@ -345,8 +348,8 @@ if __name__ == "__main__":
         # PPO
         'gae_lambda': 0.95,  # GAEのλパラメータ
         'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム
-        'vf_coef': 0.2,  # 価値関数損失の重み
-        'ent_coef': 0.005,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
+        'vf_coef': 0.5,  # 価値関数損失の重み
+        'ent_coef': 0.01,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
         'eps_clip': 0.2,  # クリッピング範囲
         'value_clip': True,  # 価値関数のクリッピング有無
         'advantage_normalization': True,  # アドバンテージ正規化の有無
@@ -379,5 +382,6 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    torch.autograd.set_detect_anomaly(True)
 
     main(config)

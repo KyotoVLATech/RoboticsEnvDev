@@ -12,12 +12,12 @@ class ResidualBlock(nn.Module):
     """
     残差ブロック
     """
-    def __init__(self, channels):
+    def __init__(self, channels, num_groups=32):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(channels)
+        self.bn1 = nn.GroupNorm(num_groups, channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.bn2 = nn.GroupNorm(num_groups, channels)
 
     def forward(self, x):
         residual = x
@@ -29,30 +29,30 @@ class ResidualBlock(nn.Module):
 
 class FeatureCNN(nn.Module):
     """
-    推奨するResNet風の画像特徴抽出CNN
     入力: (B, C, H, W)
     出力: (B, feature_dim)
     """
-    def __init__(self, in_channels=3, feature_dim=256):
+    def __init__(self, in_channels=3, feature_dim=256, num_groups=32):
         super().__init__()
+        self.feature_dim = feature_dim
         # 畳み込み層の定義
-        self.conv1 = self._make_downsample_block(in_channels, 64) # H, W -> H/2, W/2
-        self.conv2 = self._make_downsample_block(64, 128)         # -> H/4, W/4
-        self.conv3 = self._make_downsample_block(128, 256)        # -> H/8, W/8
-        self.conv4 = self._make_downsample_block(256, 256)        # -> H/16, W/16
+        self.conv1 = self._make_downsample_block(in_channels, 64, num_groups=num_groups) # H, W -> H/2, W/2
+        self.conv2 = self._make_downsample_block(64, 128, num_groups=num_groups)         # -> H/4, W/4
+        self.conv3 = self._make_downsample_block(128, 256, num_groups=num_groups)        # -> H/8, W/8
+        self.conv4 = self._make_downsample_block(256, 256, num_groups=num_groups)        # -> H/16, W/16
 
         # 残差ブロック
-        self.resblock1 = ResidualBlock(256)
-        self.resblock2 = ResidualBlock(256)
+        self.resblock1 = ResidualBlock(256, num_groups=num_groups)
+        self.resblock2 = ResidualBlock(256, num_groups=num_groups)
 
         # 空間次元を要約し、最終的な特徴ベクトルに変換
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(256, feature_dim)
 
-    def _make_downsample_block(self, in_channels, out_channels):
+    def _make_downsample_block(self, in_channels, out_channels, num_groups=32):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.GroupNorm(num_groups, out_channels),
             nn.ReLU(inplace=True)
         )
 
@@ -128,7 +128,7 @@ class VisionNet(torch.nn.Module):
         # MLPに通す
         output = self.net(combined_features)
         return output
-    
+
     def save_img(self, img_tensor):
         """
         デバッグ用に画像を保存する関数
