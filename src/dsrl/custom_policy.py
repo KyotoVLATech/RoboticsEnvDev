@@ -57,36 +57,35 @@ class SmolVLAWrapper:
             self.actions = actions.to(self.device)  # デバイスに転送
             return actions.squeeze(0)  # バッチ次元を除去
 
-    def extract_features(self, obs: Dict, task_desc: str) -> torch.Tensor:
+    def extract_features(self, obs: Dict, task_desc: str, use_dummy_vlm_features: bool = False) -> Dict[str, torch.Tensor]:
         """
         Args:
             obs: 環境からの観測
             task_desc: タスク記述
         Returns:
-            torch.Tensor: 統合された状態特徴量（画像データ、VLM特徴量、自己受容状態を含む）
+            Dict[str, torch.Tensor]: 各特徴量を分離した辞書
+                - "front_img": 画像 (C, H, W)
+                - "side_img": 画像 (C, H, W)
+                - "vlm_features": VLM特徴量
+                - "proprioceptive_state": 自己受容状態
         """
         with torch.no_grad():
             batch = self._prepare_batch(obs, task_desc)
-            # 1. 自己受容状態（proprioceptive state）の取得
             proprioceptive_state = self.smolvla_policy.prepare_state(batch)  # (1, state_dim)
-            # 2. VLM特徴量の抽出
-            vlm_features = self._extract_vlm_features(batch)
-            # 3. 画像データの取得（平坦化）
-            front_img = batch["observation.images.front"].cpu().numpy()[0]  # (3, H, W)
-            side_img = batch["observation.images.side"].cpu().numpy()[0]   # (3, H, W)
-            # 画像を平坦化
-            front_img_flat = front_img.flatten()
-            side_img_flat = side_img.flatten()
-            # 画像データ（平坦化）+ VLM特徴量 + 自己受容状態
-            front_img_tensor = torch.from_numpy(front_img_flat).float().unsqueeze(0)
-            side_img_tensor = torch.from_numpy(side_img_flat).float().unsqueeze(0)
-            state_features = torch.cat([
-                front_img_tensor,
-                side_img_tensor,
-                vlm_features.cpu(),
-                proprioceptive_state.cpu()
-            ], dim=1)
-            return state_features.squeeze(0)  # バッチ次元を除去
+            if use_dummy_vlm_features:
+                # ダミーのVLM特徴量を使用
+                vlm_features = torch.zeros((1, self.vlm_dim), device=self.device)
+            else:
+                # VLM特徴量を抽出
+                vlm_features = self._extract_vlm_features(batch)  # (1, vlm_dim)
+            front_img = batch["observation.images.front"].cpu().numpy()[0]  # (C, H, W)
+            side_img = batch["observation.images.side"].cpu().numpy()[0]   # (C, H, W)
+            return {
+                "front_img": torch.from_numpy(front_img).float(),
+                "side_img": torch.from_numpy(side_img).float(),
+                "vlm_features": vlm_features.cpu(),
+                "proprioceptive_state": proprioceptive_state.cpu()
+            }
 
     def _extract_vlm_features(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """SmolVLAのVLMの最終トークンから特徴量を取得"""

@@ -7,14 +7,14 @@ from pathlib import Path
 from typing import Dict
 import gymnasium as gym
 from tianshou.policy import SACPolicy, PPOPolicy
-from tianshou.data import Collector, VectorReplayBuffer
+from tianshou.data import Collector, VectorReplayBuffer, Batch
 from tianshou.env import DummyVectorEnv
 from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.utils import TensorboardLogger, WandbLogger
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv
+from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv, VisualObsEnv
 from src.dsrl.custom_trainer import dsrl_trainer
 from src.dsrl.feature_cnn import FeatureCNN, VisionNet
 
@@ -172,11 +172,13 @@ def make_env(config: Dict):
     task = config['task']
     if task == 'pendulum':
         env = gym.make('Pendulum-v1')
-    elif task == 'simple_pick':
+    elif task == 'state_pick':
         env = StateObsEnv(config)
-    elif task == 'vla_pick':
+    elif task == 'visual_pick':
+        env = VisualObsEnv(config)
+    elif task == 'dsrl_state_pick':
         env = NoiseActionEnv(config)
-    elif task == 'vla_visual_pick':
+    elif task == 'dsrl_visual_pick':
         env = NoiseActionVisualEnv(config)
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -200,11 +202,26 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
     episode_length = 0
     while not done and episode_length < actual_env.max_episode_steps:
         with torch.no_grad():
-            # 全てベクトル形式の観測として処理
-            action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))
+            print("come here 1")
+            # 観測の形式に応じて処理を分岐
+            if isinstance(obs, dict):
+                # print(f"Observation keys: {obs.keys()} shape: {obs['front_img'].shape if 'front_img' in obs else 'N/A'}")
+                print("come here 2")
+                obs_tensor = {}
+                obs_tensor['front_img'] = torch.FloatTensor(obs['front_img']).unsqueeze(0).to(actual_env.device)
+                obs_tensor['side_img'] = torch.FloatTensor(obs['side_img']).unsqueeze(0).to(actual_env.device)
+                obs_tensor['vlm_features'] = torch.FloatTensor(obs['vlm_features']).unsqueeze(0).to(actual_env.device)
+                obs_tensor['proprioceptive_state'] = torch.FloatTensor(obs['proprioceptive_state']).unsqueeze(0).to(actual_env.device)
+                obs_tensor['task_info'] = torch.FloatTensor(obs['task_info']).unsqueeze(0).to(actual_env.device)
+                action = policy.actor(obs_tensor)
+                # action = policy.actor(obs)
+            else:
+                print("come here 3")
+                # ベクトル形式の観測（state_pick, dsrl_state_pick用）
+                action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))
             action = action[0][0].cpu().numpy()
-            action = action[0]
-            print(f"Action min: {action.min()}, max: {action.max()}")
+            action = action[0] # 出力のmuだけを取得
+            # print(f"Action min: {action.min()}, max: {action.max()}")
         # 環境をステップ実行
         obs, _, terminated, truncated, _ = actual_env.step(action)
         episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
@@ -241,10 +258,12 @@ def main(config: Dict):
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
     train_envs = make_env(config)
     action_space = train_envs.action_space
-    state_dim = train_envs.observation_space.shape[0]
+    if config['algorithm'] == 'vision_ppo':
+        state_dim = None
+    else:
+        state_dim = train_envs.observation_space.shape[0]
     action_dim = action_space.shape[0]
     train_envs = DummyVectorEnv([lambda : train_envs])
-    logging.info(f"Environment: state_dim={state_dim}, action_dim={action_dim}")
     # Policy creation
     policy = create_policy(config['algorithm'], state_dim, action_dim, config, device)
     # Replay buffer
@@ -305,14 +324,15 @@ def main(config: Dict):
 
 if __name__ == "__main__":
     # pendulum: アルゴリズム検証用
-    # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
-    # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
-    # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
-    task = 'vla_visual_pick'
+    # state_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
+    # visual_pick: SmolVLAを使わない普通の画像観測強化学習タスク．
+    # dsrl_state_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
+    # dsrl_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
+    task = 'visual_pick'
     algorithm = 'vision_ppo'
 
-    if task == 'vla_visual_pick':
-        algorithm = 'vision_ppo'
+    if task == 'dsrl_visual_pick' or task == 'visual_pick':
+        algorithm = 'vision_ppo' # 強制上書き
 
     # Configuration
     config = {
@@ -349,16 +369,16 @@ if __name__ == "__main__":
         'gae_lambda': 0.95,  # GAEのλパラメータ
         'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム
         'vf_coef': 0.5,  # 価値関数損失の重み
-        'ent_coef': 0.01,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
-        'eps_clip': 0.2,  # クリッピング範囲
+        'ent_coef': 0.001,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
+        'eps_clip': 0.1,  # クリッピング範囲
         'value_clip': True,  # 価値関数のクリッピング有無
         'advantage_normalization': True,  # アドバンテージ正規化の有無
 
         # CNN
-        'cnn_feature_dim': 256, # 128,  # CNNの出力特徴量次元（Vision PPO用）
+        'cnn_feature_dim': 128, # 128,  # CNNの出力特徴量次元（Vision PPO用）
 
         # Logging and saving
-        'use_wandb': True,  # WandBによるロギングを有効化
+        'use_wandb': False,  # WandBによるロギングを有効化
         'wandb_project': 'smolvla', # プロジェクト名
         'wandb_run_name': None, # Noneなら自動生成
         'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_2',  # チェックポイント保存ディレクトリ
@@ -373,7 +393,7 @@ if __name__ == "__main__":
         # SmolVLA settings
         'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
         'smolvla_config_overrides': {  # SmolVLAの設定上書き
-            'n_action_steps': 10,  # 生成したaction chunkの内，何ステップを使用するか
+            'n_action_steps': 1,  # 生成したaction chunkの内，何ステップを使用するか
         }
     }
 

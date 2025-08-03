@@ -180,6 +180,103 @@ class StateObsEnv(BaseCustomEnv):
                 self.frames.append(frame)
         return new_obs, self.reward, terminated, truncated, info
 
+class VisualObsEnv(BaseCustomEnv):
+    """
+    Gym環境ラッパー：NoiseActionVisualEnvに観測を合わせつつ，普通の強化学習に対応
+    Action Space: Genesis環境と同じ9次元のアクション空間
+    Observation Space: 各特徴量を分離した辞書形式
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        smolvla_policy = load_smolvla_model(
+            config['pretrained_model_path'],
+            config['smolvla_config_overrides']
+        )
+        # 観測生成用
+        self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
+        # Action space: Genesis環境と同じ9次元のアクション空間
+        self.action_space = self.genesis_env.action_space
+        # observation_space: gym.spaces.Dictで各特徴量を分離
+        self.observation_space = gym.spaces.Dict({
+            "front_img": gym.spaces.Box(
+                low=0.0, high=255.0,
+                shape=(self.smolvla_wrapper.img_channels, self.smolvla_wrapper.img_height, self.smolvla_wrapper.img_width),
+                dtype=np.float32
+            ),
+            "side_img": gym.spaces.Box(
+                low=0.0, high=255.0,
+                shape=(self.smolvla_wrapper.img_channels, self.smolvla_wrapper.img_height, self.smolvla_wrapper.img_width),
+                dtype=np.float32
+            ),
+            "vlm_features": gym.spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(1,self.smolvla_wrapper.vlm_dim,),
+                dtype=np.float32
+            ),
+            "proprioceptive_state": gym.spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(1,self.smolvla_wrapper.proprioceptive_dim,),
+                dtype=np.float32
+            ),
+            "task_info": gym.spaces.Box(
+                low=-1.0, high=1.0,
+                shape=(1,1),
+                dtype=np.float32
+            )
+        })
+        self.current_obs = None
+        self.task_desc = None
+
+    def reset(self, seed=None, options=None):
+        """環境をリセットし、初期状態特徴量を返す（辞書形式）"""
+        self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
+        self.task_desc = self.genesis_env.get_task_description()
+        print(self.task_desc)
+        self.frames = []
+        self.reward = 0.0
+        # SmolVLAWrapperのextract_featuresを使用して各特徴量を取得
+        features_dict = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        # タスク情報を追加
+        task_info = self.get_task_info()
+        obs = {
+            **features_dict,
+            "task_info": torch.tensor([task_info], dtype=torch.float32).unsqueeze(0)
+        }
+        if self.record_video:
+            frame = self.render_frame()
+            if frame is not None:
+                self.frames.append(frame)
+        return obs, info
+
+    def step(self, action):
+        done = False
+        info = {}
+        self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
+        done = terminated or truncated
+        info.update(step_info)
+        if self.record_video and not done:
+            frame = self.render_frame()
+            if frame is not None:
+                self.frames.append(frame)
+        features_dict = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        task_info = self.get_task_info()
+        obs = {
+            **features_dict,
+            "task_info": torch.tensor([task_info], dtype=torch.float32).unsqueeze(0)
+        }
+        return obs, self.reward, terminated, truncated, info
+
+    def get_task_info(self):
+        if 'green' in self.task_desc:
+            return -1.0
+        elif 'red' in self.task_desc:
+            return 0.0
+        elif 'blue' in self.task_desc:
+            return 1.0
+        else:
+            print(f"Unknown task description: {self.task_desc}", file=sys.stderr)
+            return 0.0
+
 class NoiseActionEnv(BaseCustomEnv):
     """
     Gym環境ラッパー：GenesisEnvとSmolVLAPolicyを組み合わせてDSRLを実現
@@ -276,7 +373,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
     """
     Gym環境ラッパー：GenesisEnvとSmolVLAPolicyを組み合わせてDSRLを実現
     Action Space: ノイズベクトル (noise_dim,)
-    Observation Space: リッチな状態特徴量 (total_state_dim,)
+    Observation Space: 各特徴量を分離した辞書形式
     """
     def __init__(self, config: dict):
         super().__init__(config)
@@ -291,11 +388,34 @@ class NoiseActionVisualEnv(BaseCustomEnv):
             shape=(self.smolvla_wrapper.noise_dim,),
             dtype=np.float32
         )
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf,
-            shape=(self.smolvla_wrapper.total_state_dim,),
-            dtype=np.float32
-        )
+        # observation_space: gym.spaces.Dictで各特徴量を分離
+        self.observation_space = gym.spaces.Dict({
+            "front_img": gym.spaces.Box(
+                low=0.0, high=255.0,
+                shape=(self.smolvla_wrapper.img_channels, self.smolvla_wrapper.img_height, self.smolvla_wrapper.img_width),
+                dtype=np.float32
+            ),
+            "side_img": gym.spaces.Box(
+                low=0.0, high=255.0,
+                shape=(self.smolvla_wrapper.img_channels, self.smolvla_wrapper.img_height, self.smolvla_wrapper.img_width),
+                dtype=np.float32
+            ),
+            "vlm_features": gym.spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(1,self.smolvla_wrapper.vlm_dim,),
+                dtype=np.float32
+            ),
+            "proprioceptive_state": gym.spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(1,self.smolvla_wrapper.proprioceptive_dim,),
+                dtype=np.float32
+            ),
+            "task_info": gym.spaces.Box(
+                low=-1.0, high=1.0,
+                shape=(1,1),
+                dtype=np.float32
+            )
+        })
         self.n_action_steps = self.smolvla_wrapper.smolvla_policy.config.n_action_steps
         # Internal state
         self.current_obs = None
@@ -305,24 +425,25 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                     f"chunk_size={self.smolvla_wrapper.chunk_size}")
 
     def reset(self, seed=None, options=None):
-        """環境をリセットし、初期状態特徴量を返す"""
+        """環境をリセットし、初期状態特徴量を返す（辞書形式）"""
         self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
         self.task_desc = self.genesis_env.get_task_description()
+        print(self.task_desc)
         self.frames = []
         self.reward = 0.0
-        # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
-        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
-        # 特徴量にタスク情報を追加
+        # SmolVLAWrapperのextract_featuresを使用して各特徴量を取得
+        features_dict = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        # タスク情報を追加
         task_info = self.get_task_info()
-        state_features = torch.cat(
-            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
-            dim=0
-        )
+        obs = {
+            **features_dict,
+            "task_info": torch.tensor([task_info], dtype=torch.float32).unsqueeze(0)
+        }
         if self.record_video:
             frame = self.render_frame()
             if frame is not None:
                 self.frames.append(frame)
-        return state_features, info
+        return obs, info
 
     def step(self, noise_action):
         noise_tensor = torch.from_numpy(noise_action).float().to(self.device)
@@ -348,16 +469,16 @@ class NoiseActionVisualEnv(BaseCustomEnv):
                     self.frames.append(frame)
             if done:
                 break
-        # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
-        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
-        # 特徴量にタスク情報を追加
+        # SmolVLAWrapperのextract_featuresを使用して各特徴量を取得
+        features_dict = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        # タスク情報を追加
         task_info = self.get_task_info()
-        state_features = torch.cat(
-            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
-            dim=0
-        )
+        obs = {
+            **features_dict,
+            "task_info": torch.tensor([task_info], dtype=torch.float32).unsqueeze(0)
+        }
         reward = total_reward / self.n_action_steps
-        return state_features, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, info
 
     def get_task_info(self):
         if 'green' in self.task_desc:

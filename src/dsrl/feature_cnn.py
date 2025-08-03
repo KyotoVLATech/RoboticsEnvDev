@@ -96,19 +96,16 @@ class VisionNet(torch.nn.Module):
         self.vlm_dim = vlm_dim
 
     def forward(self, obs, state=None, info={}):
-        if isinstance(obs, np.ndarray):
-            obs_tensor = torch.from_numpy(obs).float().to(self.device)
-        elif isinstance(obs, torch.Tensor):
-            obs_tensor = obs.float().to(self.device)
-        # 統合ベクトルから各要素を分離: front_img + side_img + vlm_features + proprioceptive_state
-        front_img_flat = obs_tensor[:, :self.front_img_size]
-        side_img_flat = obs_tensor[:, self.front_img_size:self.front_img_size + self.side_img_size]
-        vlm_features = obs_tensor[:, self.front_img_size + self.side_img_size:self.front_img_size + self.side_img_size + self.vlm_dim]
-        proprioceptive_state = obs_tensor[:, self.front_img_size + self.side_img_size + self.vlm_dim:-1]
-        task_id = obs_tensor[:, -1]  # 最後の要素はタスクID
-        # 画像を元の形状に復元
-        front_img = front_img_flat.view(-1, self.img_channels, self.img_height, self.img_width)
-        side_img = side_img_flat.view(-1, self.img_channels, self.img_height, self.img_width)
+        # 必要なキーが存在するかチェック
+        required_keys = ["front_img", "side_img", "vlm_features", "proprioceptive_state", "task_info"]
+        if all(hasattr(obs, key) or (hasattr(obs, 'keys') and key in obs.keys()) for key in required_keys):
+            front_img = obs["front_img"].float().to(self.device)  # (B, C, H, W)
+            side_img = obs["side_img"].float().to(self.device)    # (B, C, H, W)
+            vlm_features = obs["vlm_features"].float().to(self.device).squeeze(0) if len(obs["vlm_features"].shape) == 3 else obs["vlm_features"].float().to(self.device)  # (B, vlm_dim)
+            proprioceptive_state = obs["proprioceptive_state"].float().to(self.device).squeeze(0) if len(obs["proprioceptive_state"].shape) == 3 else obs["proprioceptive_state"].float().to(self.device)  # (B, proprio_dim)
+            task_id = obs["task_info"].float().to(self.device).squeeze(0) if len(obs["task_info"].shape) == 3 else obs["task_info"].float().to(self.device)  # (B, 1)
+        else:
+            raise ValueError("obs must be a dict with keys: front_img, side_img, vlm_features, proprioceptive_state, task_info")
         # 画像をリサイズしてCNN用に準備
         front_img_resized = torch.nn.functional.interpolate(front_img, size=(128, 128), mode='bilinear', align_corners=False)
         side_img_resized = torch.nn.functional.interpolate(side_img, size=(128, 128), mode='bilinear', align_corners=False)
@@ -120,11 +117,11 @@ class VisionNet(torch.nn.Module):
         # CNN特徴量抽出
         cnn_feat = self.cnn(concat_img)
         # proprioceptive_stateを正規化
-        proprioceptive_state /= np.pi
+        proprioceptive_state = proprioceptive_state / np.pi
         # vlm_featuresを正規化
-        vlm_features /= 5.0
+        vlm_features = vlm_features / 5.0
         # 全ての特徴量を結合
-        combined_features = torch.cat([cnn_feat, vlm_features, proprioceptive_state, task_id.unsqueeze(1)], dim=1)  # (B, feature_dim + vlm_dim + proprio_dim + 1)
+        combined_features = torch.cat([cnn_feat, vlm_features, proprioceptive_state, task_id], dim=1)  # (B, feature_dim + vlm_dim + proprio_dim + 1)
         # MLPに通す
         output = self.net(combined_features)
         return output
