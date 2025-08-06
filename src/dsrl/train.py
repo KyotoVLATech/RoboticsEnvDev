@@ -140,6 +140,7 @@ def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
         discount_factor=config.get('gamma', 0.99),
         gae_lambda=config.get('gae_lambda', 0.95),
         max_grad_norm=config.get('max_grad_norm', 0.5),
+        max_batchsize=config.get('max_batchsize', 1200),
         vf_coef=config.get('vf_coef', 0.5),
         ent_coef=config.get('ent_coef', 0.01),
         eps_clip=config.get('eps_clip', 0.2),
@@ -270,13 +271,15 @@ def main(config: Dict):
     if config['algorithm'].lower() in ['sac', 'ddpg', 'td3']:
         buffer = VectorReplayBuffer(
             config.get('buffer_size', 100000),
-            1
+            1,
+            save_only_last_obs=False
         )
     else:
         # On-policy algorithms don't need a replay buffer in the same way
         buffer = VectorReplayBuffer(
             config.get('step_per_collect', 2048),
-            1
+            1,
+            save_only_last_obs=False
         )
     # Collectors
     train_collector = Collector(

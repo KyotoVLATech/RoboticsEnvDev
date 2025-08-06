@@ -62,6 +62,7 @@ class DSRLTrainer(BaseTrainer):
                 self.log_update_data(data, losses)
         else:
             # On-policy update (PPO, A2C, TRPO)
+            # bufferがおかしい．
             losses = self.policy.update(
                 0,
                 self.train_collector.buffer,
