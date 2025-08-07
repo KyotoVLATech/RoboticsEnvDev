@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.dsrl.custom_policy import SmolVLAWrapper, load_smolvla_model
 
 class ResidualBlock(nn.Module):
     """
@@ -140,3 +140,47 @@ class VisionNet(torch.nn.Module):
             img_np = np.transpose(img_np, (1, 2, 0)) # チャンネルを最後に移動
             img_pil = Image.fromarray(img_np)
             img_pil.save("debug_image.png")
+
+class VisionFeatureTest1(nn.Module):
+    """
+    CNNを用いて画像から特徴量を抽出するテスト用ネットワーク
+    """
+    def __init__(self, feature_dim=256):
+        super().__init__()
+        self.cnn = FeatureCNN(in_channels=3, feature_dim=feature_dim)
+        self.fc = nn.Linear(feature_dim + 1, 3)
+    def forward(self, input_dict):
+        image1 = input_dict["observation.images.front"]
+        image2 = input_dict["observation.images.side"]
+        image3 = input_dict["observation.images.eef"]
+        task_id = input_dict["task_id"]
+        # 画像を結合
+        concat_img = torch.cat([image1, image2, image3], dim=2)
+        # CNNで特徴量を抽出
+        features = self.cnn(concat_img)
+        # タスクIDを特徴量に追加
+        task_id = task_id.unsqueeze(1).float()
+        features = torch.cat([features, task_id], dim=1)
+        # 全結合層で出力
+        output = self.fc(features)
+        return output
+
+class VisionFeatureTest2(nn.Module):
+    """
+    SmolVLAのイメージトークナイザを利用して画像特徴量を抽出するテスト用ネットワーク
+    """
+    def __init__(self, config):
+        super().__init__()
+        smolvla_policy = load_smolvla_model(
+            config['pretrained_model_path'],
+            config['smolvla_config_overrides']
+        )
+        self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
+        self.fc = nn.Linear(961, 3)
+
+    def forward(self, input_dict):
+        batch = self.smolvla_wrapper._prepare_batch(input_dict, input_dict["task_desc"])
+        with torch.no_grad():
+            features = self.smolvla_wrapper._extract_vision_features(batch)
+        output = self.fc(features)
+        return output

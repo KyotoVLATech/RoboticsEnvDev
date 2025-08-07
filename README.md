@@ -98,13 +98,14 @@ uv run -m lerobot.scripts.train \
     --dataset.repo_id=local/${DATASET_NAME} \
     --dataset.root=datasets/${DATASET_NAME} \
     --policy.path=lerobot/smolvla_base \
+    --policy.push_to_hub=false \
     --output_dir=outputs/train/smolvla_${DATASET_NAME} \
     --job_name=smolvla_${DATASET_NAME} \
     --policy.device=cuda \
     --wandb.enable=true \
     --wandb.disable_artifact=true \
     --batch_size=64 \
-    --steps=20000
+    --steps=200000
 ```
 0から
 ```bash

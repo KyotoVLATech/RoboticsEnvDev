@@ -1,6 +1,5 @@
 import logging
 from typing import Dict, Optional
-import numpy as np
 import torch
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d_masks
 from lerobot.policies.factory import get_policy_class

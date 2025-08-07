@@ -3,6 +3,7 @@ import numpy as np
 from gymnasium import spaces
 import random
 import torch
+from scipy.spatial.transform import Rotation
 
 joints_name = (
     "joint1",
@@ -80,6 +81,14 @@ class SimplePickTask:
             fov=28,
             GUI=False
         )
+        # エンドエフェクタカメラを追加
+        self.eef_cam = self.scene.add_camera(
+            res=(self.observation_width, self.observation_height),
+            pos=(0.5, 0.0, 0.7), # いったん適当に配置
+            lookat=(0.5, 0.0, 0.1),
+            fov=50,
+            GUI=False
+        )
         self.scene.build()
         self.motors_dof = np.arange(7)
         self.fingers_dof = np.arange(7, 9)
@@ -91,7 +100,7 @@ class SimplePickTask:
             "observation.images.front": spaces.Box(low=0, high=255, shape=(self.observation_height, self.observation_width, 3), dtype=np.uint8),
             "observation.images.side": spaces.Box(low=0, high=255, shape=(self.observation_height, self.observation_width, 3), dtype=np.uint8),
         })
-    
+
     def set_random_state(self, target, x_range, y_range, z):
         x = np.random.uniform(x_range[0], x_range[1])
         y = np.random.uniform(y_range[0], y_range[1])
@@ -100,7 +109,7 @@ class SimplePickTask:
         quat_tensor = torch.tensor([0, 0, 0, 1], dtype=torch.float32, device=gs.device)
         target.set_pos(pos_tensor)
         target.set_quat(quat_tensor)
-    
+
     def reset(self):
         self.color = random.choice(["red", "blue", "green"])
         # CubeAの位置をランダムに設定
@@ -125,13 +134,14 @@ class SimplePickTask:
         self.franka.set_qpos(qpos_tensor, zero_velocity=True)
         self.franka.control_dofs_position(qpos_tensor[:7], self.motors_dof)
         self.franka.control_dofs_position(qpos_tensor[7:], self.fingers_dof)
+        self._set_eef_cam_pos()
 
         # ステップ実行
         self.scene.step()
         self.front_cam.start_recording()
         self.side_cam.start_recording()
         return self.get_obs(), {}
-        
+
     def seed(self, seed):
         np.random.seed(seed)
         random.seed(seed)
@@ -144,6 +154,7 @@ class SimplePickTask:
         action_tensor = torch.tensor(action, dtype=torch.float32, device=gs.device)
         self.franka.control_dofs_position(action_tensor[:7], self.motors_dof)
         self.franka.control_dofs_position(action_tensor[7:], self.fingers_dof)
+        self._set_eef_cam_pos()
         self.scene.step()
         reward = self.compute_reward()
         obs = self.get_obs()
@@ -151,7 +162,7 @@ class SimplePickTask:
         truncated = False
         info = {}
         return obs, reward, terminated, truncated, info
-    
+
     def compute_reward(self):
         if self.color == "red":
             pos = self.cubeA.get_pos().cpu().numpy()
@@ -182,25 +193,55 @@ class SimplePickTask:
         # sideカメラの画像を取得
         side_pixels = self.side_cam.render()[0]
         assert side_pixels.ndim == 3, f"side_pixels shape {side_pixels.shape} is not 3D (H, W, 3)"
+        # eefカメラの画像を取得
+        eef_pixels = self.eef_cam.render()[0]
+        assert eef_pixels.ndim == 3, f"eef_pixels shape {eef_pixels.shape} is not 3D (H, W, 3)"
         obs = {
             "agent_pos": agent_pos,
             "observation.images.front": front_pixels,
             "observation.images.side": side_pixels,
+            "observation.images.eef": eef_pixels,
         }
         return obs
 
     def save_videos(self, file_name, fps=30):
         self.front_cam.stop_recording(save_to_filename=f"{file_name}_front.mp4", fps=fps)
         self.side_cam.stop_recording(save_to_filename=f"{file_name}_side.mp4", fps=fps)
+        self.eef_cam.stop_recording(save_to_filename=f"{file_name}_eef.mp4", fps=fps)
 
     def close(self):
         gs.destroy()
 
+    def _set_eef_cam_pos(self):
+        # エンドエフェクタの同時変換行列を取得
+        eef_pos = self.eef.get_pos().cpu().numpy()
+        eef_rot = self.eef.get_quat().cpu().numpy()
+        eef_rot = eef_rot[[1, 2, 3, 0]]  # Quaternionの順序を修正
+        eef_R = Rotation.from_quat(eef_rot)
+        angle = np.deg2rad(160)
+        cam_R = (eef_R * Rotation.from_rotvec([0, angle, 0]) * Rotation.from_rotvec([0, 0, np.pi/2])).as_matrix()
+        offset = eef_R.as_matrix() @ np.array([0.07, 0.0, 0.0])
+        cam_pos = eef_pos + offset
+        eef_transform = np.eye(4)
+        eef_transform[:3, :3] = cam_R
+        eef_transform[:3, 3] = cam_pos
+        self.eef_cam.set_pose(transform=eef_transform)
+
 if __name__ == "__main__":
     import cv2
+    import time
     gs.init(backend=gs.cpu, precision="32")
-    task = SimplePickTask(observation_height=512, observation_width=512, show_viewer=True)
+    task = SimplePickTask(observation_height=512, observation_width=512, show_viewer=False)
     task.reset()
-    for _ in range(100):
+    for _ in range(10):
         action = np.random.uniform(-1.0, 1.0, size=(AGENT_DIM,))
-        task.step(action)
+        obs, _, _, _, _ = task.step(action)
+        # 画像を保存
+        front_img = obs["observation.images.front"]
+        side_img = obs["observation.images.side"]
+        eef_img = obs["observation.images.eef"]
+        cv2.imwrite("front_image.png", front_img)
+        cv2.imwrite("side_image.png", side_img)
+        cv2.imwrite("eef_image.png", eef_img)
+        # delay
+        time.sleep(1.0)

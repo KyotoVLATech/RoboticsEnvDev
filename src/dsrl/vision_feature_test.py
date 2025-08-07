@@ -1,13 +1,16 @@
 import numpy as np
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from env.genesis_env import GenesisEnv
-from env.tasks.test import joints_name
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 import os
 import numpy as np
 from PIL import Image
+import torch
+import wandb
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from env.genesis_env import GenesisEnv
+from env.tasks.test import joints_name
+from src.dsrl.feature_cnn import VisionFeatureTest1, VisionFeatureTest2
 
 task_description = {
     "test": "Pick up a red cube and place it in a box.",
@@ -86,45 +89,83 @@ def initialize_dataset(task, height, width):
     )
     return lerobot_dataset
 
+def get_task_info(task_desc: str) -> float:
+    if 'green' in task_desc:
+        return -1.0
+    elif 'red' in task_desc:
+        return 0.0
+    elif 'blue' in task_desc:
+        return 1.0
+    else:
+        print(f"Unknown task description: {task_desc}", file=sys.stderr)
+        return 0.0
+
 def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
     env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
     dataset = initialize_dataset(task, observation_height, observation_width)
+    config = {
+        "model_path": "smolvla_model.pth",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "smolvla_config_overrides": {}
+    }
+    test1 = VisionFeatureTest1(feature_dim=256).to(config['device'])
+    test2 = VisionFeatureTest2(config).to(config['device'])
+    opt1 = torch.optim.AdamW(test1.parameters(), lr=1e-4)
+    opt2 = torch.optim.AdamW(test2.parameters(), lr=1e-4)
     ep = 0
+    global_step = 0
     while ep < episode_num:
-        print(f"\n🎬 Starting episode {ep+1}")
         env.reset()
         states, images_front, images_side, images_eef, actions = [], [], [], [], []
         save_flag = False
         episode_reward = 0.0
         for stage in stage_dict.keys():
-            print(f"  Stage: {stage}")
             for t in range(stage_dict[stage]):
                 action = expert_policy(env, stage)
                 obs, reward, _, _, _ = env.step(action)
+                obs['task_desk'] = env.get_task_description()
+                obs['task_id'] = torch.tensor(get_task_info(obs['task_desk']), dtype=torch.float32)
+                output1 = test1(obs)
+                output2 = test2(obs)
+                if env._env.color == "red":
+                    target = env._env.cubeA.get_pos().cpu().numpy()
+                elif env._env.color == "blue":
+                    target = env._env.cubeB.get_pos().cpu().numpy()
+                elif env._env.color == "green":
+                    target = env._env.cubeC.get_pos().cpu().numpy()
+                else:
+                    raise ValueError(f"Unknown color: {env._env.color}")
+                target -= env._env.eef.get_pos().cpu().numpy() # エンドエフェクタからの相対位置に変換
+                loss1 = torch.nn.functional.mse_loss(output1, torch.tensor(target, dtype=torch.float32))
+                loss2 = torch.nn.functional.mse_loss(output2, torch.tensor(target, dtype=torch.float32))
+                opt1.zero_grad()
+                loss1.backward()
+                opt1.step()
+                opt2.zero_grad()
+                loss2.backward()
+                opt2.step()
+                wandb.log({
+                    "loss1": loss1.item(),
+                    "loss2": loss2.item(),
+                    "global_step": global_step,
+                })
                 episode_reward += reward
                 states.append(obs["agent_pos"])
                 images_front.append(obs["observation.images.front"])
                 images_side.append(obs["observation.images.side"])
                 images_eef.append(obs["observation.images.eef"])
                 actions.append(action)
+                global_step += 1
                 if reward >= 1.0:
                     save_flag = True
-        if task == "simple_pick":
-            if episode_reward >= 40.0:
-                print(f"Episode reward: {episode_reward}, success!")
-                save_flag = True
-            else:
-                print(f"Episode reward: {episode_reward}, failed.")
-                save_flag = False
-        # デバッグ用
-        # env.save_video(file_name=f"video", fps=30)
-
+        if episode_reward >= 40.0:
+            save_flag = True
+        else:
+            print(f"Episode reward: {episode_reward}, failed.")
+            save_flag = False
         if not save_flag:
-            print(f"🚫 Skipping episode {ep+1}")
             continue
-        print(f"✅ Saving episode {ep+1}")
         ep += 1
-
         for i in range(len(states)):
             image_front = images_front[i]
             if isinstance(image_front, Image.Image):
@@ -149,23 +190,13 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
     env.close()
 
 if __name__ == "__main__":
-    task = "simple_pick" # [test, simple_pick]
-    if task == "test":
-        stage_dict = { # 350
-            "hover": 100, # cubeの上に手を持っていく
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-            "to_box": 60, # cubeを箱の上に持っていく
-            "stabilize_box": 20, # cubeを箱の上で安定させる
-            "release": 60, # cubeを離す
-        }
-    elif task == "simple_pick":
-        stage_dict = { # 210
-            "hover1": 100, # cubeの上に手を持っていく
-            "hover2": 30, # cubeの上で手を安定させる
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-        }
+    wandb.init(project="vision-feature-test")
+    task = "simple_pick"
+    stage_dict = {
+        "hover1": 100,
+        "hover2": 30,
+        "stabilize": 40,
+        "grasp": 20,
+        "lift": 50,
+    }
     main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=500, show_viewer=False)
