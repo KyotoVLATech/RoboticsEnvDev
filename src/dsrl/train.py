@@ -14,7 +14,7 @@ from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.utils import TensorboardLogger, WandbLogger
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv
+from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv, VisualObsEnv
 from src.dsrl.custom_trainer import dsrl_trainer
 from src.dsrl.feature_cnn import FeatureCNN, VisionNet
 
@@ -172,11 +172,13 @@ def make_env(config: Dict):
     task = config['task']
     if task == 'pendulum':
         env = gym.make('Pendulum-v1')
-    elif task == 'simple_pick':
+    elif task == 'state_rl':
         env = StateObsEnv(config)
-    elif task == 'vla_pick':
+    elif task == 'vision_rl':
+        env = VisualObsEnv(config)
+    elif task == 'state_dsrl':
         env = NoiseActionEnv(config)
-    elif task == 'vla_visual_pick':
+    elif task == 'vision_dsrl':
         env = NoiseActionVisualEnv(config)
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -204,10 +206,14 @@ def record_training_video(env, policy, config: Dict, epoch: int) -> None:
             action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))
             action = action[0][0].cpu().numpy()
             action = action[0]
-            print(f"Action min: {action.min()}, max: {action.max()}")
+            # mu = action[0]
+            # sigma = action[1]
+            # action = mu + sigma * np.random.randn(*mu.shape)
+            # print(f"Action min: {action.min()}, max: {action.max()}")
         # 環境をステップ実行
         obs, _, terminated, truncated, _ = actual_env.step(action)
-        episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
+        if 'dsrl' in config['task']:
+            episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
         done = terminated or truncated
     frames = actual_env.stop_video_recording()
     if frames:
@@ -305,13 +311,14 @@ def main(config: Dict):
 
 if __name__ == "__main__":
     # pendulum: アルゴリズム検証用
-    # simple_pick: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
-    # vla_pick: SmolVLAを使ったSimplePickタスク．observationはsimple_pickと同じ
-    # vla_visual_pick: SmolVLAを使ったSimplePickタスク．SmolVLAのエンコーダから取得した特徴量をobservationとする．（テキスト，画像，自己受容状態）
-    task = 'vla_visual_pick'
-    algorithm = 'vision_ppo'
+    # state_rl: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
+    # vision_rl: SmolVLAを使わない普通のSimplePickタスク．画像を観測として使用する．
+    # state_dsrl: SmolVLAを使ったSimplePickタスク．observationはstate_rlと同じ
+    # vision_dsrl: SmolVLAを使ったSimplePickタスク．画像を観測として利用.
+    task = 'vision_dsrl'
+    algorithm = 'ppo'
 
-    if task == 'vla_visual_pick':
+    if task == 'vision_rl' or task == 'vision_dsrl':
         algorithm = 'vision_ppo'
 
     # Configuration
@@ -326,7 +333,7 @@ if __name__ == "__main__":
         'show_viewer': False, # TrueでGenesisのViewerを表示
 
         # Training settings
-        'max_epoch': 3000,  # 学習エポック数
+        'max_epoch': 1000,  # 学習エポック数
         'step_per_epoch': 1200, # 1エポックあたりに収集するデータのステップ数．1エポックのupdate回数は step_per_epoch * repeat_per_collect / batch_size
         'step_per_collect': 1200, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
         'batch_size': 100,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的

@@ -17,3 +17,4 @@ outputs/
 
 .vscode/
 wandb/
+debug_image.png

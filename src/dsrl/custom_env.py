@@ -180,6 +180,78 @@ class StateObsEnv(BaseCustomEnv):
                 self.frames.append(frame)
         return new_obs, self.reward, terminated, truncated, info
 
+class VisualObsEnv(BaseCustomEnv):
+    """
+    Gym環境ラッパー：NoiseActionVisualEnvに観測を合わせつつ，普通の強化学習に対応
+    Action Space: Genesis環境と同じ9次元のアクション空間
+    Observation Space: 各特徴量を分離した辞書形式
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        smolvla_policy = load_smolvla_model(
+            config['pretrained_model_path'],
+            config['smolvla_config_overrides']
+        )
+        # 観測生成用
+        self.smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
+        # Action space: Genesis環境と同じ9次元のアクション空間
+        self.action_space = self.genesis_env.action_space
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(self.smolvla_wrapper.total_state_dim,),
+            dtype=np.float32
+        )
+        self.current_obs = None
+        self.task_desc = None
+
+    def reset(self, seed=None, options=None):
+        """環境をリセットし、初期状態特徴量を返す（辞書形式）"""
+        self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
+        self.task_desc = self.genesis_env.get_task_description()
+        print(self.task_desc, flush=True)
+        self.frames = []
+        self.reward = 0.0
+        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        task_info = self.get_task_info()
+        state_features = torch.cat(
+            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
+            dim=0
+        )
+        if self.record_video:
+            frame = self.render_frame()
+            if frame is not None:
+                self.frames.append(frame)
+        return state_features, info
+
+    def step(self, action):
+        done = False
+        info = {}
+        self.current_obs, self.reward, terminated, truncated, step_info = self.genesis_env.step(action)
+        done = terminated or truncated
+        info.update(step_info)
+        if self.record_video and not done:
+            frame = self.render_frame()
+            if frame is not None:
+                self.frames.append(frame)
+        state_features = self.smolvla_wrapper.extract_features(self.current_obs, self.task_desc)
+        task_info = self.get_task_info()
+        state_features = torch.cat(
+            [state_features, torch.tensor([task_info], device='cpu', dtype=torch.float32)],
+            dim=0
+        )
+        return state_features, self.reward, terminated, truncated, info
+
+    def get_task_info(self):
+        if 'green' in self.task_desc:
+            return -1.0
+        elif 'red' in self.task_desc:
+            return 0.0
+        elif 'blue' in self.task_desc:
+            return 1.0
+        else:
+            print(f"Unknown task description: {self.task_desc}", file=sys.stderr)
+            return 0.0
+
 class NoiseActionEnv(BaseCustomEnv):
     """
     Gym環境ラッパー：GenesisEnvとSmolVLAPolicyを組み合わせてDSRLを実現
@@ -308,6 +380,7 @@ class NoiseActionVisualEnv(BaseCustomEnv):
         """環境をリセットし、初期状態特徴量を返す"""
         self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
         self.task_desc = self.genesis_env.get_task_description()
+        print(self.task_desc, flush=True)
         self.frames = []
         self.reward = 0.0
         # SmolVLAWrapperのextract_featuresを使用して統合特徴量を取得
