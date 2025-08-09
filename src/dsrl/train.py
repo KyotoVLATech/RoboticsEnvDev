@@ -1,0 +1,302 @@
+import os
+import sys
+import logging
+import numpy as np
+import torch
+from pathlib import Path
+from typing import Dict
+import gymnasium as gym
+from tianshou.policy import SACPolicy, PPOPolicy
+from tianshou.data import Collector, VectorReplayBuffer
+from tianshou.env import DummyVectorEnv
+from tianshou.utils.net.common import Net
+from tianshou.utils.net.continuous import ActorProb, Critic
+from tianshou.utils import TensorboardLogger, WandbLogger
+from grams import Grams
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv, VisualObsEnv
+from src.dsrl.custom_trainer import dsrl_trainer
+from src.dsrl.feature_cnn import CustomNet
+
+def create_sac_policy(config: Dict):
+    """SAC Policyを作成"""
+    device = config["device"]
+    net_a = CustomNet(config)
+    actor = ActorProb(net_a, config["action_dim"], max_action=1.0, device=device, unbounded=True, conditioned_sigma=True).to(device)
+    net_c1 = CustomNet(config, action_dim=config["action_dim"])
+    net_c2 = CustomNet(config, action_dim=config["action_dim"])
+    critic1 = Critic(net_c1, device=device).to(device)
+    critic2 = Critic(net_c2, device=device).to(device)
+    optim_actor = Grams(actor.parameters(), lr=config['learning_rate'])
+    optim_critic1 = Grams(critic1.parameters(), lr=config['critic_lr'])
+    optim_critic2 = Grams(critic2.parameters(), lr=config['critic_lr'])
+    policy = SACPolicy(
+        actor=actor,
+        critic1=critic1,
+        critic2=critic2,
+        actor_optim=optim_actor,
+        critic1_optim=optim_critic1,
+        critic2_optim=optim_critic2,
+        tau=config.get('tau', 0.005),
+        gamma=config.get('gamma', 0.99),
+        alpha=config.get('alpha', 0.2),
+        estimation_step=config.get('estimation_step', 1),
+        action_space=None
+    )
+    return policy
+
+def create_ppo_policy(config: Dict):
+    """PPO Policyを作成"""
+    device = config["device"]
+    net_a = CustomNet(config)
+    actor = ActorProb( net_a, config["action_dim"], max_action=1.0, device=device, unbounded=True, conditioned_sigma=True).to(device)
+    net_c = CustomNet(config, action_dim=config["action_dim"])
+    critic = Critic(net_c, device=device).to(device)
+    optim = Grams(actor.parameters(), lr=config['learning_rate'])
+    policy = PPOPolicy(
+        actor=actor,
+        critic=critic,
+        optim=optim,
+        discount_factor=config.get('gamma', 0.99),
+        gae_lambda=config.get('gae_lambda', 0.95),
+        max_grad_norm=config.get('max_grad_norm', 0.5),
+        vf_coef=config.get('vf_coef', 0.5),
+        ent_coef=config.get('ent_coef', 0.01),
+        eps_clip=config.get('eps_clip', 0.2),
+        value_clip=config.get('value_clip', True),
+        dual_clip=config.get('dual_clip', None),
+        advantage_normalization=config.get('advantage_normalization', True),
+        recompute_advantage=config.get('recompute_advantage', False),
+        action_space=None
+    )
+    return policy
+
+def create_policy(config: Dict):
+    """アルゴリズムに応じたpolicyを作成"""
+    if config["algorithm"] == 'sac':
+        return create_sac_policy(config)
+    elif config["algorithm"] == 'ppo':
+        return create_ppo_policy(config)
+    else:
+        raise ValueError(f"Unsupported algorithm: {config['algorithm']}")
+
+def make_env(config: Dict):
+    """環境を作成する関数"""
+    task = config['task']
+    if task == 'pendulum':
+        env = gym.make('Pendulum-v1')
+    elif task == 'state_rl':
+        env = StateObsEnv(config)
+    elif task == 'vision_rl':
+        env = VisualObsEnv(config)
+    elif task == 'state_dsrl':
+        env = NoiseActionEnv(config)
+    elif task == 'vision_dsrl':
+        env = NoiseActionVisualEnv(config)
+    else:
+        raise ValueError(f"Unknown task: {task}")
+    return env
+
+def get_nested_attr(obj, attr_path, default=None):
+    current = obj
+    for attr in attr_path.split('.'):
+        try:
+            current = getattr(current, attr)
+        except AttributeError:
+            return default
+    return current
+
+def record_training_video(env, policy, config: Dict, epoch: int) -> None:
+    """学習中の動画を記録してWandBにアップロード"""
+    actual_env : BaseCustomEnv = env.workers[0].env
+    actual_env.start_video_recording()
+    obs, _ = actual_env.reset()
+    done = False
+    episode_length = 0
+    while not done and episode_length < actual_env.max_episode_steps:
+        with torch.no_grad():
+            # 全てベクトル形式の観測として処理
+            action = policy.actor(torch.FloatTensor(obs).unsqueeze(0).to(actual_env.device))
+            action = action[0][0].cpu().numpy()
+            action = action[0]
+            # mu = action[0]
+            # sigma = action[1]
+            # action = mu + sigma * np.random.randn(*mu.shape)
+            # print(f"Action min: {action.min()}, max: {action.max()}")
+        # 環境をステップ実行
+        obs, _, terminated, truncated, _ = actual_env.step(action)
+        if 'dsrl' in config['task']:
+            episode_length += 1 * get_nested_attr(actual_env, 'smolvla_wrapper.smolvla_policy.config.n_action_steps', 1)
+        done = terminated or truncated
+    frames = actual_env.stop_video_recording()
+    if frames:
+        actual_env.upload_video_to_wandb(frames)
+
+def save_checkpoint(policy, epoch: int, checkpoint_dir: str):
+    """チェックポイントを保存し、ファイルパスを返す"""
+    checkpoint_path = Path(checkpoint_dir) / f"epoch_{epoch}"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    # Save policy
+    save_path = checkpoint_path / "policy.pth"
+    torch.save(policy.state_dict(), save_path)
+    logging.info(f"Checkpoint saved to {checkpoint_path}")
+    return str(save_path)
+
+def main(config: Dict):
+    if config['task'] == 'pendulum':
+        config['record_video'] = False  # Pendulum does not support video recording
+    if config.get('use_wandb', True):
+        import wandb
+        wandb.init(
+            project=config.get('wandb_project', 'smolvla'),
+            name=config.get('wandb_run_name'),
+            config=config,
+            sync_tensorboard=True
+        )
+    # Device設定
+    config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+    logging.info(f"Using device: {config['device']}")
+    Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
+    train_envs = make_env(config)
+    action_space = train_envs.action_space
+    config["state_dim"] = train_envs.observation_space.shape[0]
+    config["action_dim"] = action_space.shape[0]
+    train_envs = DummyVectorEnv([lambda : train_envs])
+    logging.info(f"Environment: state_dim={config['state_dim']}, action_dim={config['action_dim']}")
+    # Policy creation
+    policy = create_policy(config)
+    # Replay buffer
+    if config['algorithm'].lower() in ['sac', 'ddpg', 'td3']:
+        buffer = VectorReplayBuffer(
+            config.get('buffer_size', 100000),
+            1
+        )
+    else:
+        # On-policy algorithms don't need a replay buffer in the same way
+        buffer = VectorReplayBuffer(
+            config.get('step_per_collect', 2048),
+            1
+        )
+    # Collectors
+    train_collector = Collector(
+        policy, train_envs, buffer, exploration_noise=True
+    )
+    # Logger
+    from torch.utils.tensorboard import SummaryWriter
+    log_path = Path(config['checkpoint_dir']) / 'logs'
+    log_path.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(str(log_path))
+    if config.get('use_wandb', True):
+        # wandb.initは既に行われているので、引数なしでWandbLoggerを初期化
+        train_interval = config.get('log_per_epoch', 1) * config.get('step_per_epoch', 2048)
+        update_interval = config.get('log_per_epoch', 1) * np.ceil(config.get('step_per_epoch', 300) / config.get('step_per_collect', 300)) * config.get('repeat_per_collect', 10) * np.ceil(config.get('step_per_collect', 300) / config.get('batch_size', 64))
+        save_interval = config.get('save_checkpoint_interval', 50)
+        logger = WandbLogger(train_interval=train_interval, update_interval=update_interval, save_interval=save_interval)
+        logger.load(writer)
+    else:
+        logger = TensorboardLogger(writer)
+    config['logger'] = logger
+
+    def save_fn(epoch, env_step, gradient_step):
+        path = save_checkpoint(policy, epoch, config['checkpoint_dir'])
+        logging.info(f"Checkpoint saved at epoch {epoch}")
+        return path
+
+    config['save_checkpoint_fn'] = save_fn
+    # Training with unified trainer
+    result = dsrl_trainer(
+        algorithm=config['algorithm'],
+        policy=policy,
+        train_collector=train_collector,
+        test_collector=None,
+        max_epoch=config.get('max_epoch', 100),
+        step_per_epoch=config.get('step_per_epoch', 10000),
+        batch_size=config.get('batch_size', 256),
+        config=config,
+        record_video_fn=record_training_video if (config.get('record_video', False) and config.get('use_wandb', True)) else None,
+        train_envs=train_envs if config.get('record_video', False) else None,
+    )
+
+    train_envs.close()
+    logging.info("Training completed!")
+    return result
+
+if __name__ == "__main__":
+    # pendulum: アルゴリズム検証用
+    # state_rl: SmolVLAを使わない普通のSimplePickタスク．joint位置，速度，目標とエンドエフェクタの相対座標をobservationとする
+    # vision_rl: SmolVLAを使わない普通のSimplePickタスク．画像を観測として使用する．
+    # state_dsrl: SmolVLAを使ったSimplePickタスク．observationはstate_rlと同じ
+    # vision_dsrl: SmolVLAを使ったSimplePickタスク．画像を観測として利用.
+    task = 'state_rl'
+    algorithm = 'sac'
+
+    # Configuration
+    config = {
+        # Algorithm settings
+        'algorithm': algorithm,
+
+        # Environment settings
+        'task': task,
+        'observation_height': 512, # 観測画像の高さ（基本的に変更不要）
+        'observation_width': 512,  # 観測画像の幅（基本的に変更不要）
+        'show_viewer': False, # TrueでGenesisのViewerを表示
+
+        # Training settings
+        'max_epoch': 1000,  # 学習エポック数
+        'step_per_epoch': 1200, # 1エポックあたりに収集するデータのステップ数．1エポックのupdate回数は step_per_epoch * repeat_per_collect / batch_size
+        'step_per_collect': 300, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
+        'batch_size': 256,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的
+        'update_per_step': 20, # 1ステップごとのネットワーク更新回数（Off-policy用）
+        'repeat_per_collect': 10,  # 10 1回の収集ごとのネットワーク更新回数（On-policy用）
+
+        # Network settings
+        'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
+        'learning_rate': 1e-4,  # 学習率
+        'buffer_size': 100000,  # リプレイバッファのサイズ
+
+        # Algorithm-specific hyperparameters
+        # SAC
+        'critic_lr': 3e-4, # learning_rateはactor
+        'gamma': 0.999,  # 割引率（SAC/PPO共通）
+        'tau': 0.005,  # ターゲットネットワークのソフト更新率
+        'alpha': 0.2,  # エントロピー正則化係数
+        'estimation_step': 1,  # 状態価値推定のステップ数 TD-N
+
+        # PPO
+        'gae_lambda': 0.95,  # GAEのλパラメータ
+        'max_grad_norm': 0.5,  # 勾配クリッピングの最大ノルム
+        'vf_coef': 0.5,  # 価値関数損失の重み
+        'ent_coef': 0.01,  # エントロピー損失の重み 0.01は大きすぎる可能性がある
+        'eps_clip': 0.2,  # クリッピング範囲
+        'value_clip': True,  # 価値関数のクリッピング有無
+        'advantage_normalization': True,  # アドバンテージ正規化の有無
+
+        # Logging and saving
+        'use_wandb': True,  # WandBによるロギングを有効化
+        'wandb_project': 'smolvla', # プロジェクト名
+        'wandb_run_name': None, # Noneなら自動生成
+        'checkpoint_dir': f'outputs/train/dsrl_{algorithm}_{task}_2',  # チェックポイント保存ディレクトリ
+        'resume_from_log': False,  # ログから学習を再開するか（Trueの動作未確認
+        'log_per_epoch': 1, # 何エポックごとにログを記録するか
+        'save_checkpoint_interval': 10, # 何エポックごとにチェックポイントを保存するか
+
+        # Video recording settings
+        'record_video': True,  # 学習中の動画記録を有効化（pendulumなら自動で無効化）
+        'video_record_interval': 10,  # 何エポックごとに動画を記録するか
+
+        # SmolVLA settings
+        'pretrained_model_path': 'outputs/train/smolvla_simple_pick_0/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
+        'smolvla_config_overrides': {  # SmolVLAの設定上書き
+            'n_action_steps': 10,  # 生成したaction chunkの内，何ステップを使用するか
+        }
+    }
+
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    torch.autograd.set_detect_anomaly(True)
+
+    main(config)

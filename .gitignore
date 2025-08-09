@@ -1,7 +1,7 @@
 # data
 datasets/
-URDF/
-
+dataset/
+*.safetensors
 # cache
 __pycache__/
 .mypy_cache/
@@ -14,3 +14,7 @@ outputs/
 
 # archive
 *.zip
+
+.vscode/
+wandb/
+debug_image.png

@@ -1,17 +1,13 @@
 import numpy as np
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from env.genesis_env import GenesisEnv
-from env.tasks.test import joints_name
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 import os
 import numpy as np
 from PIL import Image
-
-task_description = {
-    "test": "Pick up a red cube and place it in a box.",
-}
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.genesis_env import GenesisEnv
+from env.tasks.test import joints_name
 
 def expert_policy(env, stage):
     task = env._env
@@ -66,10 +62,10 @@ def expert_policy(env, stage):
 def initialize_dataset(task, height, width):
     # Initialize dataset
     dict_idx = 0
-    dataset_path = f"datasets/{task}_{dict_idx}"
-    while os.path.exists(f"datasets/{task}_{dict_idx}"):
+    dataset_path = f"datasets/vision_test_{dict_idx}"
+    while os.path.exists(f"datasets/vision_test_{dict_idx}"):
         dict_idx += 1
-        dataset_path = f"datasets/{task}_{dict_idx}"
+        dataset_path = f"datasets/vision_test_{dict_idx}"
     lerobot_dataset = LeRobotDataset.create(
         repo_id=None,
         fps=30,
@@ -77,6 +73,7 @@ def initialize_dataset(task, height, width):
         robot_type="franka",
         use_videos=True,
         features={
+            "target": {"dtype": "float", "shape": (3,), "names": ("x", "y", "z")},
             "observation.state": {"dtype": "float32", "shape": (9,), "names": joints_name},
             "action": {"dtype": "float32", "shape": (9,), "names": joints_name},
             "observation.images.front": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
@@ -93,11 +90,18 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
         env.reset()
-        states, images_front, images_side, images_eef, actions = [], [], [], [], []
+        if env._env.color == "red":
+            target = env._env.cubeA.get_pos()
+        elif env._env.color == "blue":
+            target = env._env.cubeB.get_pos()
+        elif env._env.color == "green":
+            target = env._env.cubeC.get_pos()
+        else:
+            raise ValueError(f"Unknown color: {env._env.color}")
+        images_front, images_side, images_eef, targets, states, actions = [], [], [], [], [], []
         save_flag = False
         episode_reward = 0.0
         for stage in stage_dict.keys():
-            print(f"  Stage: {stage}")
             for t in range(stage_dict[stage]):
                 action = expert_policy(env, stage)
                 obs, reward, _, _, _ = env.step(action)
@@ -107,25 +111,18 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
                 images_side.append(obs["observation.images.side"])
                 images_eef.append(obs["observation.images.eef"])
                 actions.append(action)
+                targets.append(target.cpu().numpy())
                 if reward >= 1.0:
                     save_flag = True
-        if task == "simple_pick":
-            if episode_reward >= 40.0:
-                print(f"Episode reward: {episode_reward}, success!")
-                save_flag = True
-            else:
-                print(f"Episode reward: {episode_reward}, failed.")
-                save_flag = False
-        # デバッグ用
-        # env.save_video(file_name=f"video", fps=30)
-
+        if episode_reward >= 40.0:
+            save_flag = True
+        else:
+            save_flag = False
         if not save_flag:
-            print(f"🚫 Skipping episode {ep+1}")
             continue
-        print(f"✅ Saving episode {ep+1}")
         ep += 1
 
-        for i in range(len(states)):
+        for i in range(len(images_front)):
             image_front = images_front[i]
             if isinstance(image_front, Image.Image):
                 image_front = np.array(image_front)
@@ -135,8 +132,10 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             image_eef = images_eef[i]
             if isinstance(image_eef, Image.Image):
                 image_eef = np.array(image_eef)
+            target = targets[i].astype(np.float64)
             dataset.add_frame(
                 {
+                    "target": target,
                     "observation.state": states[i].astype(np.float32),
                     "action": actions[i].astype(np.float32),
                     "observation.images.front": image_front,
@@ -149,23 +148,12 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
     env.close()
 
 if __name__ == "__main__":
-    task = "simple_pick" # [test, simple_pick]
-    if task == "test":
-        stage_dict = { # 350
-            "hover": 100, # cubeの上に手を持っていく
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-            "to_box": 60, # cubeを箱の上に持っていく
-            "stabilize_box": 20, # cubeを箱の上で安定させる
-            "release": 60, # cubeを離す
-        }
-    elif task == "simple_pick":
-        stage_dict = { # 210
-            "hover1": 100, # cubeの上に手を持っていく
-            "hover2": 30, # cubeの上で手を安定させる
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-        }
-    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=500, show_viewer=False)
+    ep_num = 100
+    stage_dict = {
+        "hover1": 100, # cubeの上に手を持っていく
+        "hover2": 30, # cubeの上で手を安定させる
+        "stabilize": 40, # cubeの上で手を安定させる
+        "grasp": 20, # cubeを掴む
+        "lift": 50, # cubeを持ち上げる
+    }
+    main("simple_pick", stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=ep_num, show_viewer=False)
