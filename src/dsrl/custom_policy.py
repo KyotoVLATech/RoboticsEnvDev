@@ -25,14 +25,8 @@ class SmolVLAWrapper:
         self.noise_dim = self.smolvla_policy.config.max_action_dim
         # VLMの隠れ状態次元を取得
         self.proprioceptive_dim = self.smolvla_policy.config.max_state_dim
-        self.vlm_dim = 720
-        # 画像サイズを計算（512x512x3の画像2枚）
-        self.img_height = 512
-        self.img_width = 512
-        self.img_channels = 3
-        self.front_img_size = self.img_height * self.img_width * self.img_channels
-        self.side_img_size = self.img_height * self.img_width * self.img_channels
-        self.total_state_dim = self.front_img_size + self.side_img_size + self.vlm_dim + self.proprioceptive_dim
+        vlm_dim = 720
+        self.total_state_dim = 960*3 + vlm_dim + self.proprioceptive_dim
         self.actions = torch.zeros((1, self.chunk_size, self.noise_dim), device=self.device)
 
     def generate_actions_from_noise(self, latent_noise: torch.Tensor, obs: Dict, task_desc: str) -> torch.Tensor:
@@ -72,19 +66,11 @@ class SmolVLAWrapper:
             # 2. VLM特徴量の抽出
             vlm_features = self._extract_vlm_features(batch)
             # 3. 画像データの取得（平坦化）
-            front_img = batch["observation.images.front"].cpu().numpy()[0]  # (3, H, W)
-            side_img = batch["observation.images.side"].cpu().numpy()[0]   # (3, H, W)
-            # 画像を平坦化
-            front_img_flat = front_img.flatten()
-            side_img_flat = side_img.flatten()
-            # 画像データ（平坦化）+ VLM特徴量 + 自己受容状態
-            front_img_tensor = torch.from_numpy(front_img_flat).float().unsqueeze(0)
-            side_img_tensor = torch.from_numpy(side_img_flat).float().unsqueeze(0)
+            vit_features = self._extract_vision_features(batch)  # (1, 960*3)
             state_features = torch.cat([
-                front_img_tensor,
-                side_img_tensor,
-                vlm_features.cpu(),
-                proprioceptive_state.cpu()
+                vit_features.cpu(),
+                vlm_features.cpu(), # 720
+                proprioceptive_state.cpu() # 32
             ], dim=1)
             return state_features.squeeze(0)  # バッチ次元を除去
 
@@ -127,11 +113,9 @@ class SmolVLAWrapper:
                 pixel_values=img.to(dtype=self.smolvla_policy.model.vlm_with_expert.get_vlm_model().vision_model.dtype),
                 patch_attention_mask=None,
             ).last_hidden_state
-            # image_hidden_states shape: [1, 1024, 768]
             resampled = self.smolvla_policy.model.vlm_with_expert.get_vlm_model().connector(image_hidden_states)
-            # resampled shape: [1, 64, 960]
             feature = resampled.mean(dim=1)
-            features.append(feature)
+            features.append(feature) # [1, 960]
         return torch.cat(features, dim=1).to(dtype=torch.float32)
 
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:

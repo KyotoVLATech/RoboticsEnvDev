@@ -124,7 +124,7 @@ if __name__ == "__main__":
         "epoch": 2,
         "test_interval": 1000, # steps
         "test_data_num": 100,
-        "data_path": "datasets/vision_test_0",
+        "data_path": "datasets/vision_test_1",
         "model_path": "outputs/train/smolvla_simple_pick_0/checkpoints/last/pretrained_model",
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "lr": 1e-4,

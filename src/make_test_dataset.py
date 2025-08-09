@@ -111,8 +111,7 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
                 images_side.append(obs["observation.images.side"])
                 images_eef.append(obs["observation.images.eef"])
                 actions.append(action)
-                t = target - env._env.eef.get_pos()
-                targets.append(t.cpu().numpy())
+                targets.append(target.cpu().numpy())
                 if reward >= 1.0:
                     save_flag = True
         if episode_reward >= 40.0:

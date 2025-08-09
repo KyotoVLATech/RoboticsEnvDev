@@ -12,131 +12,52 @@ from tianshou.env import DummyVectorEnv
 from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
 from tianshou.utils import TensorboardLogger, WandbLogger
+from grams import Grams
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.dsrl.custom_env import NoiseActionEnv, StateObsEnv, NoiseActionVisualEnv, BaseCustomEnv, VisualObsEnv
 from src.dsrl.custom_trainer import dsrl_trainer
-from src.dsrl.feature_cnn import FeatureCNN, VisionNet
+from src.dsrl.feature_cnn import CustomNet
 
-def create_sac_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
-    """SAC用のアクター・クリティックネットワークを作成"""
-    
-    # Actor network
-    net_a = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    actor = ActorProb(
-        net_a, action_dim, max_action=1.0, device=device,
-        unbounded=True, conditioned_sigma=True
-    ).to(device)
-    
-    # Critic networks
-    net_c1 = Net(
-        state_dim, action_dim, hidden_sizes=[hidden_dim, hidden_dim], 
-        concat=True, device=device
-    )
-    critic1 = Critic(net_c1, device=device).to(device)
-    
-    net_c2 = Net(
-        state_dim, action_dim, hidden_sizes=[hidden_dim, hidden_dim],
-        concat=True, device=device
-    )
-    critic2 = Critic(net_c2, device=device).to(device)
-    return actor, critic1, critic2
-
-def create_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, device: str = "cuda"):
-    """PPO用のアクター・クリティックネットワークを作成"""
-    # Actor network
-    net_a = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    actor = ActorProb(
-        net_a, action_dim, max_action=1.0, device=device,
-        unbounded=True, conditioned_sigma=True
-    ).to(device)
-    # Critic network
-    net_c = Net(state_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    critic = Critic(net_c, device=device).to(device)
-    return actor, critic
-
-def create_vision_ppo_networks(state_dim: int, action_dim: int, hidden_dim: int = 256, feature_dim: int = 128, device: str = "cuda"):
-    """
-    画像＋VLM＋自己受容状態対応PPOネットワークを作成
-    state_dimは実際には使用されず、VisionNetが動的に次元を計算する
-    """
-    shared_cnn = FeatureCNN(in_channels=3, feature_dim=feature_dim).to(device)
-    
-    # VisionNetの出力次元を計算
-    # CNN特徴量 + VLM特徴量 + 自己受容状態
-    vlm_dim = 720
-    proprioceptive_dim = 32
-    task_info_dim = 1  # タスク情報の次元
-    combined_feature_dim = feature_dim + vlm_dim + proprioceptive_dim + task_info_dim
-
-    net_a = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    vision_net_a = VisionNet(shared_cnn, net_a, vlm_dim, device)
-    actor = ActorProb(
-        vision_net_a, action_dim, max_action=1.0, device=device,
-        unbounded=True, conditioned_sigma=True
-    ).to(device)
-    net_c = Net(combined_feature_dim, hidden_sizes=[hidden_dim, hidden_dim], device=device)
-    vision_net_c = VisionNet(shared_cnn, net_c, vlm_dim, device)
-    critic = Critic(vision_net_c, device=device).to(device)
-    return actor, critic
-
-def create_sac_policy(actor, critic1, critic2, config: Dict, device: str = "cuda"):
+def create_sac_policy(config: Dict):
     """SAC Policyを作成"""
-    # Optimizers
-    optim_actor = torch.optim.AdamW(actor.parameters(), lr=config.get('learning_rate', 3e-4))
-    optim_critic1 = torch.optim.AdamW(critic1.parameters(), lr=config.get('learning_rate', 3e-4))
-    optim_critic2 = torch.optim.AdamW(critic2.parameters(), lr=config.get('learning_rate', 3e-4))
-    # SAC Policy
+    device = config["device"]
+    net_a = CustomNet(config)
+    actor = ActorProb(net_a, config["action_dim"], max_action=1.0, device=device, unbounded=True, conditioned_sigma=True).to(device)
+    net_c1 = CustomNet(config, action_dim=config["action_dim"])
+    net_c2 = CustomNet(config, action_dim=config["action_dim"])
+    critic1 = Critic(net_c1, device=device).to(device)
+    critic2 = Critic(net_c2, device=device).to(device)
+    optim_actor = Grams(actor.parameters(), lr=config['learning_rate'])
+    optim_critic1 = Grams(critic1.parameters(), lr=config['critic_lr'])
+    optim_critic2 = Grams(critic2.parameters(), lr=config['critic_lr'])
     policy = SACPolicy(
         actor=actor,
-        critic1=critic1, 
+        critic1=critic1,
         critic2=critic2,
-        actor_optim=optim_actor, 
-        critic1_optim=optim_critic1, 
+        actor_optim=optim_actor,
+        critic1_optim=optim_critic1,
         critic2_optim=optim_critic2,
         tau=config.get('tau', 0.005),
         gamma=config.get('gamma', 0.99),
         alpha=config.get('alpha', 0.2),
         estimation_step=config.get('estimation_step', 1),
-        action_space=None  # Will be set by the environment
+        action_space=None
     )
-    
     return policy
 
-def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
+def create_ppo_policy(config: Dict):
     """PPO Policyを作成"""
-    
-    # Optimizers
-    params = list({p for p in list(actor.parameters()) + list(critic.parameters())}) # 重複を排除
-    optim = torch.optim.AdamW(
-        params,
-        lr=config.get('learning_rate', 3e-4)
-    )
-    
-    # Value function
-    def dist_fn(*logits):
-        # logitsは展開されて渡される場合があるので適切に処理
-        if len(logits) == 2:
-            # 平均と標準偏差が別々に渡される場合
-            mean, std = logits
-        elif len(logits) == 1:
-            # 単一のテンソルの場合、平均と標準偏差を分割
-            logits = logits[0]
-            if isinstance(logits, tuple):
-                mean, std = logits
-            else:
-                mean, std = logits.chunk(2, dim=-1)
-                std = torch.clamp(std, min=-20, max=2).exp()
-        else:
-            raise ValueError(f"Unexpected number of logits: {len(logits)}")
-        return torch.distributions.Independent(torch.distributions.Normal(mean, std), 1)
-    
-    # PPO Policy
+    device = config["device"]
+    net_a = CustomNet(config)
+    actor = ActorProb( net_a, config["action_dim"], max_action=1.0, device=device, unbounded=True, conditioned_sigma=True).to(device)
+    net_c = CustomNet(config, action_dim=config["action_dim"])
+    critic = Critic(net_c, device=device).to(device)
+    optim = Grams(actor.parameters(), lr=config['learning_rate'])
     policy = PPOPolicy(
         actor=actor,
         critic=critic,
         optim=optim,
-        dist_fn=dist_fn,
         discount_factor=config.get('gamma', 0.99),
         gae_lambda=config.get('gae_lambda', 0.95),
         max_grad_norm=config.get('max_grad_norm', 0.5),
@@ -147,25 +68,18 @@ def create_ppo_policy(actor, critic, config: Dict, device: str = "cuda"):
         dual_clip=config.get('dual_clip', None),
         advantage_normalization=config.get('advantage_normalization', True),
         recompute_advantage=config.get('recompute_advantage', False),
-        action_space=None  # Will be set by the environment
+        action_space=None
     )
     return policy
 
-def create_policy(algorithm: str, state_dim: int, action_dim: int, config: Dict, device: str = "cuda"):
+def create_policy(config: Dict):
     """アルゴリズムに応じたpolicyを作成"""
-    algorithm = algorithm.lower()
-    hidden_dim = config.get('hidden_dim', 256)
-    if algorithm == 'sac':
-        actor, critic1, critic2 = create_sac_networks(state_dim, action_dim, hidden_dim, device)
-        return create_sac_policy(actor, critic1, critic2, config, device)
-    elif algorithm == 'ppo':
-        actor, critic = create_ppo_networks(state_dim, action_dim, hidden_dim, device)
-        return create_ppo_policy(actor, critic, config, device)
-    elif algorithm == 'vision_ppo':
-        actor, critic = create_vision_ppo_networks(state_dim, action_dim, hidden_dim, feature_dim=config.get('cnn_feature_dim', 128), device=device)
-        return create_ppo_policy(actor, critic, config, device)
+    if config["algorithm"] == 'sac':
+        return create_sac_policy(config)
+    elif config["algorithm"] == 'ppo':
+        return create_ppo_policy(config)
     else:
-        raise ValueError(f"Unsupported algorithm: {algorithm}")
+        raise ValueError(f"Unsupported algorithm: {config['algorithm']}")
 
 def make_env(config: Dict):
     """環境を作成する関数"""
@@ -241,18 +155,17 @@ def main(config: Dict):
             sync_tensorboard=True
         )
     # Device設定
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    config['device'] = device
-    logging.info(f"Using device: {device}")
+    config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+    logging.info(f"Using device: {config['device']}")
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
     train_envs = make_env(config)
     action_space = train_envs.action_space
-    state_dim = train_envs.observation_space.shape[0]
-    action_dim = action_space.shape[0]
+    config["state_dim"] = train_envs.observation_space.shape[0]
+    config["action_dim"] = action_space.shape[0]
     train_envs = DummyVectorEnv([lambda : train_envs])
-    logging.info(f"Environment: state_dim={state_dim}, action_dim={action_dim}")
+    logging.info(f"Environment: state_dim={config['state_dim']}, action_dim={config['action_dim']}")
     # Policy creation
-    policy = create_policy(config['algorithm'], state_dim, action_dim, config, device)
+    policy = create_policy(config)
     # Replay buffer
     if config['algorithm'].lower() in ['sac', 'ddpg', 'td3']:
         buffer = VectorReplayBuffer(
@@ -316,10 +229,7 @@ if __name__ == "__main__":
     # state_dsrl: SmolVLAを使ったSimplePickタスク．observationはstate_rlと同じ
     # vision_dsrl: SmolVLAを使ったSimplePickタスク．画像を観測として利用.
     task = 'state_rl'
-    algorithm = 'ppo'
-
-    if task == 'vision_rl' or task == 'vision_dsrl':
-        algorithm = 'vision_ppo'
+    algorithm = 'sac'
 
     # Configuration
     config = {
@@ -335,19 +245,20 @@ if __name__ == "__main__":
         # Training settings
         'max_epoch': 1000,  # 学習エポック数
         'step_per_epoch': 1200, # 1エポックあたりに収集するデータのステップ数．1エポックのupdate回数は step_per_epoch * repeat_per_collect / batch_size
-        'step_per_collect': 1200, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
-        'batch_size': 100,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的
-        'update_per_step': 1, # 1ステップごとのネットワーク更新回数（Off-policy用）
+        'step_per_collect': 300, # 1回の収集で環境から集めるデータのステップ数 環境のリセット数の倍数にする．大きい方が更新が安定するが，学習速度は遅くなる
+        'batch_size': 256,  # バッチサイズ PPOならstep_per_collectの約数にした方が効率的
+        'update_per_step': 20, # 1ステップごとのネットワーク更新回数（Off-policy用）
         'repeat_per_collect': 10,  # 10 1回の収集ごとのネットワーク更新回数（On-policy用）
 
         # Network settings
         'hidden_dim': 256,  # ニューラルネットワークの隠れ層の次元数
-        'learning_rate': 3e-4,  # 学習率 3e-4
+        'learning_rate': 1e-4,  # 学習率
         'buffer_size': 100000,  # リプレイバッファのサイズ
 
         # Algorithm-specific hyperparameters
         # SAC
-        'gamma': 0.97,  # 割引率（SAC/PPO共通）
+        'critic_lr': 3e-4, # learning_rateはactor
+        'gamma': 0.999,  # 割引率（SAC/PPO共通）
         'tau': 0.005,  # ターゲットネットワークのソフト更新率
         'alpha': 0.2,  # エントロピー正則化係数
         'estimation_step': 1,  # 状態価値推定のステップ数 TD-N
@@ -360,9 +271,6 @@ if __name__ == "__main__":
         'eps_clip': 0.2,  # クリッピング範囲
         'value_clip': True,  # 価値関数のクリッピング有無
         'advantage_normalization': True,  # アドバンテージ正規化の有無
-
-        # CNN
-        'cnn_feature_dim': 256, # 128,  # CNNの出力特徴量次元（Vision PPO用）
 
         # Logging and saving
         'use_wandb': True,  # WandBによるロギングを有効化
@@ -378,7 +286,7 @@ if __name__ == "__main__":
         'video_record_interval': 10,  # 何エポックごとに動画を記録するか
 
         # SmolVLA settings
-        'pretrained_model_path': 'outputs/train/smolvla_simple_pick/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
+        'pretrained_model_path': 'outputs/train/smolvla_simple_pick_0/checkpoints/last/pretrained_model',  # SmolVLAの事前学習モデルパス
         'smolvla_config_overrides': {  # SmolVLAの設定上書き
             'n_action_steps': 10,  # 生成したaction chunkの内，何ステップを使用するか
         }
