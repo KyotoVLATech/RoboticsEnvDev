@@ -4,199 +4,134 @@ import sys
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 import os
 import numpy as np
-from PIL import Image
 import torch
 import wandb
+import tqdm
+from safetensors import safe_open
+from safetensors.torch import save_file
+from grams import Grams
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from env.genesis_env import GenesisEnv
-from env.tasks.test import joints_name
 from src.dsrl.feature_cnn import VisionFeatureTest1, VisionFeatureTest2
+from src.dsrl.custom_policy import SmolVLAWrapper, load_smolvla_model
 
-task_description = {
-    "test": "Pick up a red cube and place it in a box.",
-}
-
-def expert_policy(env, stage):
-    task = env._env
-    if task.color == "red":
-        cube_pos = task.cubeA.get_pos().cpu().numpy()
-    elif task.color == "blue":
-        cube_pos = task.cubeB.get_pos().cpu().numpy()
-    elif task.color == "green":
-        cube_pos = task.cubeC.get_pos().cpu().numpy()
-    finder_pos = -0.02  # tighter grip
-    quat = np.array([0, 1, 0, 0]) # Changed from [[0, 1, 0, 0]] to [0, 1, 0, 0]
-    eef = task.eef
-    if stage == "hover1":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.3])
-        grip = np.array([0.04, 0.04])
-    elif stage == "hover2":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.2])
-        grip = np.array([0.04, 0.04])
-    elif stage == "stabilize":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.1])
-        grip = np.array([0.04, 0.04])
-    elif stage == "grasp":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.1])  # lower slightly
-        grip = np.array([finder_pos, finder_pos])  # close grip
-    elif stage == "lift":
-        target_pos = np.array([cube_pos[0], cube_pos[1], 0.25])
-        grip = np.array([finder_pos, finder_pos])  # keep closed
-    elif stage == "to_box":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([finder_pos, finder_pos])
-    elif stage == "stabilize_box":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([finder_pos, finder_pos])
-    elif stage == "release":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([0.04, 0.04])
-    else:
-        raise ValueError(f"Unknown stage: {stage}")
-    # Use IK to compute joint positions for the arm
-    qpos = task.franka.inverse_kinematics(
-        link=eef,
-        pos=target_pos,
-        quat=quat,
-    ).cpu().numpy()
-    qpos_arm = qpos[:-2]
-    action = np.concatenate([qpos_arm, grip]) # Shape (9)
-    return action.astype(np.float32)
-
-def initialize_dataset(task, height, width):
-    # Initialize dataset
-    dict_idx = 0
-    dataset_path = f"datasets/{task}_{dict_idx}"
-    while os.path.exists(f"datasets/{task}_{dict_idx}"):
-        dict_idx += 1
-        dataset_path = f"datasets/{task}_{dict_idx}"
-    lerobot_dataset = LeRobotDataset.create(
-        repo_id=None,
-        fps=30,
-        root=dataset_path,
-        robot_type="franka",
-        use_videos=True,
-        features={
-            "observation.state": {"dtype": "float32", "shape": (9,), "names": joints_name},
-            "action": {"dtype": "float32", "shape": (9,), "names": joints_name},
-            "observation.images.front": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-            "observation.images.side": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-            "observation.images.eef": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-        },
+def main(config):
+    if config["use_wandb"]:
+        wandb.init(
+            project="vision-feature-test",
+            config=config
+        )
+    dataset = LeRobotDataset(
+        repo_id=config['data_path'],
+        root=config['data_path']
     )
-    return lerobot_dataset
-
-def get_task_info(task_desc: str) -> float:
-    if 'green' in task_desc:
-        return -1.0
-    elif 'red' in task_desc:
-        return 0.0
-    elif 'blue' in task_desc:
-        return 1.0
-    else:
-        print(f"Unknown task description: {task_desc}", file=sys.stderr)
-        return 0.0
-
-def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
-    env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
-    dataset = initialize_dataset(task, observation_height, observation_width)
-    config = {
-        "model_path": "smolvla_model.pth",
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "smolvla_config_overrides": {}
-    }
-    test1 = VisionFeatureTest1(feature_dim=256).to(config['device'])
+    smolvla_policy = load_smolvla_model(
+        config['model_path'],
+    )
+    smolvla_wrapper = SmolVLAWrapper(smolvla_policy, config['device'])
+    test1 = VisionFeatureTest1(config).to(config['device'])
     test2 = VisionFeatureTest2(config).to(config['device'])
-    opt1 = torch.optim.AdamW(test1.parameters(), lr=1e-4)
-    opt2 = torch.optim.AdamW(test2.parameters(), lr=1e-4)
-    ep = 0
+    # opt1 = torch.optim.RAdam(test1.parameters(), lr=config["lr"])
+    # opt2 = torch.optim.RAdam(test2.parameters(), lr=config["lr"])
+    opt1 = Grams(test1.parameters(), lr=config["lr"])
+    opt2 = Grams(test2.parameters(), lr=config["lr"])
+    print("Dataset size: ", len(dataset))
+    # Prepare VLA feature
+    vla_features_path = "src/dsrl/vla_features.safetensors"
+    if not os.path.exists(vla_features_path):
+        vit_features = []
+        vlm_features = []
+        for i in tqdm.tqdm(range(len(dataset)), desc="Extracting VLA features"):
+            data = dataset[i]
+            data = smolvla_wrapper._prepare_batch(data, data["task"])
+            with torch.no_grad():
+                vit_feat = smolvla_wrapper._extract_vision_features(data)
+                vlm_feat = smolvla_wrapper._extract_vlm_features(data)
+                vit_features.append(vit_feat.cpu())
+                vlm_features.append(vlm_feat.cpu())
+        # safetensorsで保存するためにテンソルを結合
+        vit_tensor = torch.stack(vit_features, dim=0)  # (num_samples, feature_dim)
+        vlm_tensor = torch.stack(vlm_features, dim=0)  # (num_samples, feature_dim)
+        tensors = {
+            "vit_features": vit_tensor,
+            "vlm_features": vlm_tensor
+        }
+        save_file(tensors, vla_features_path)
+    else:
+        # safetensorsから読み込み
+        with safe_open(vla_features_path, framework="pt", device="cpu") as f:
+            vit_features = f.get_tensor("vit_features")
+            vlm_features = f.get_tensor("vlm_features")
+    random_indices = np.random.permutation(len(dataset)).tolist()
+    test_indices = random_indices[:config["test_data_num"]]
+    learning_indices = random_indices[config["test_data_num"]:]
     global_step = 0
-    while ep < episode_num:
-        env.reset()
-        states, images_front, images_side, images_eef, actions = [], [], [], [], []
-        save_flag = False
-        episode_reward = 0.0
-        for stage in stage_dict.keys():
-            for t in range(stage_dict[stage]):
-                action = expert_policy(env, stage)
-                obs, reward, _, _, _ = env.step(action)
-                obs['task_desk'] = env.get_task_description()
-                obs['task_id'] = torch.tensor(get_task_info(obs['task_desk']), dtype=torch.float32)
-                output1 = test1(obs)
-                output2 = test2(obs)
-                if env._env.color == "red":
-                    target = env._env.cubeA.get_pos().cpu().numpy()
-                elif env._env.color == "blue":
-                    target = env._env.cubeB.get_pos().cpu().numpy()
-                elif env._env.color == "green":
-                    target = env._env.cubeC.get_pos().cpu().numpy()
-                else:
-                    raise ValueError(f"Unknown color: {env._env.color}")
-                target -= env._env.eef.get_pos().cpu().numpy() # エンドエフェクタからの相対位置に変換
-                loss1 = torch.nn.functional.mse_loss(output1, torch.tensor(target, dtype=torch.float32))
-                loss2 = torch.nn.functional.mse_loss(output2, torch.tensor(target, dtype=torch.float32))
-                opt1.zero_grad()
-                loss1.backward()
-                opt1.step()
-                opt2.zero_grad()
-                loss2.backward()
-                opt2.step()
+    for i in range(config['epoch']):
+        print(f"Epoch {i+1}/{config['epoch']}")
+        for idx in tqdm.tqdm(learning_indices):
+            data = dataset[idx]
+            data["vit_features"] = vit_features[idx].to(config["device"])
+            data["vlm_features"] = vlm_features[idx].to(config["device"])
+            output1 = test1(data).squeeze()
+            output2 = test2(data).squeeze()
+            target = data["target"].to(config["device"])
+            loss1 = torch.nn.functional.mse_loss(output1, target)
+            loss2 = torch.nn.functional.mse_loss(output2, target)
+            opt1.zero_grad()
+            loss1.backward()
+            opt1.step()
+            opt2.zero_grad()
+            loss2.backward()
+            opt2.step()
+            if config["use_wandb"]:
                 wandb.log({
-                    "loss1": loss1.item(),
-                    "loss2": loss2.item(),
+                    "train/loss1": loss1.item(),
+                    "train/loss2": loss2.item(),
                     "global_step": global_step,
                 })
-                episode_reward += reward
-                states.append(obs["agent_pos"])
-                images_front.append(obs["observation.images.front"])
-                images_side.append(obs["observation.images.side"])
-                images_eef.append(obs["observation.images.eef"])
-                actions.append(action)
-                global_step += 1
-                if reward >= 1.0:
-                    save_flag = True
-        if episode_reward >= 40.0:
-            save_flag = True
-        else:
-            print(f"Episode reward: {episode_reward}, failed.")
-            save_flag = False
-        if not save_flag:
-            continue
-        ep += 1
-        for i in range(len(states)):
-            image_front = images_front[i]
-            if isinstance(image_front, Image.Image):
-                image_front = np.array(image_front)
-            image_side = images_side[i]
-            if isinstance(image_side, Image.Image):
-                image_side = np.array(image_side)
-            image_eef = images_eef[i]
-            if isinstance(image_eef, Image.Image):
-                image_eef = np.array(image_eef)
-            dataset.add_frame(
-                {
-                    "observation.state": states[i].astype(np.float32),
-                    "action": actions[i].astype(np.float32),
-                    "observation.images.front": image_front,
-                    "observation.images.side": image_side,
-                    "observation.images.eef": image_eef,
-                },
-                task=env.get_task_description(),
-            )
-        dataset.save_episode()
-    env.close()
+            if global_step % config['test_interval'] == 0:
+                test1.eval()
+                test2.eval()
+                with torch.no_grad():
+                    dist_list1 = []
+                    dist_list2 = []
+                    for test_idx in test_indices:
+                        test_data = dataset[test_idx]
+                        test_data["vit_features"] = vit_features[test_idx].to(config["device"])
+                        test_data["vlm_features"] = vlm_features[test_idx].to(config["device"])
+                        output1 = test1(test_data).squeeze()
+                        output2 = test2(test_data).squeeze()
+                        target = test_data["target"].to(config["device"])
+                        # 距離を計算
+                        distance1 = torch.norm(output1 - target)
+                        distance2 = torch.norm(output2 - target)
+                        dist_list1.append(distance1.item())
+                        dist_list2.append(distance2.item())
+                    if config["use_wandb"]:
+                        wandb.log({
+                            "test/dist1_mean": np.mean(dist_list1),
+                            "test/dist1_std": np.std(dist_list1),
+                            "test/dist2_mean": np.mean(dist_list2),
+                            "test/dist2_std": np.std(dist_list2),
+                            "global_step": global_step,
+                        })
+                test1.train()
+                test2.train()
+            global_step += 1
 
 if __name__ == "__main__":
-    wandb.init(project="vision-feature-test")
-    task = "simple_pick"
-    stage_dict = {
-        "hover1": 100,
-        "hover2": 30,
-        "stabilize": 40,
-        "grasp": 20,
-        "lift": 50,
+    config = {
+        "use_wandb": True,
+        "epoch": 2,
+        "test_interval": 1000, # steps
+        "test_data_num": 100,
+        "data_path": "datasets/vision_test_0",
+        "model_path": "outputs/train/smolvla_simple_pick_0/checkpoints/last/pretrained_model",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "lr": 1e-4,
+        "test1_feature_dim": 256,
+        "use_residual": False, # Test1にResidualを使用するかどうか
+        "use_task_id": False, # タスクIDを使用するかどうか
+        "use_mlp1": True, # Test1にMLPを使用するかどうか
+        "use_mlp2": True, # Test2にMLPを使用するかどうか
     }
-    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=500, show_viewer=False)
+    main(config)

@@ -237,7 +237,7 @@ def main(training_name, observation_height, observation_width, episode_num, show
         f.write(f"Success rate: {success_num}/{episode_num} ({(success_num / episode_num) * 100:.2f}%)\n")
 
 if __name__ == "__main__":
-    training_name = "smolvla_simple_pick"
+    training_name = "smolvla_simple_pick_0"
     observation_height = 512
     observation_width = 512
     episode_num = 3

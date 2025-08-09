@@ -128,20 +128,20 @@ class StateObsEnv(BaseCustomEnv):
         super().__init__(config)
         self.action_space = self.genesis_env.action_space
         # observationとして目標のboxの座標とjointの位置・速度を返す
-        # joint 9自由度 * 2 (位置, 速度) + boxの座標3次元 = 21次元
+        # joint 9自由度 * 2 (位置, 速度) + boxの座標3次元 * 3 + task id 1次元 = 28次元
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf,
-            # shape=(3,), dtype=np.float32
-            # shape=(12,), dtype=np.float32
-            shape=(21,), dtype=np.float32
+            shape=(28,), dtype=np.float32
         )
         self.old_pos = None
         self.current_obs = None
+        self.task_desc = None
 
     def reset(self, seed=None, options=None):
         """環境をリセットし、初期状態特徴量を返す"""
         self.old_pos = None
         self.current_obs, info = self.genesis_env.reset(seed=seed, options=options)
+        self.task_desc = self.genesis_env.get_task_description()
         new_obs = self.make_obs(self.current_obs)
         # Video recording reset
         self.frames = []
@@ -155,18 +155,11 @@ class StateObsEnv(BaseCustomEnv):
     def make_obs(self, obs):
         jooint_pos = obs['agent_pos']
         joint_vel = np.zeros_like(jooint_pos) if self.old_pos is None else (jooint_pos - self.old_pos)
-        if self.genesis_env._env.color == "red":
-            target_pos = self.genesis_env._env.cubeA.get_pos().cpu().numpy()
-        elif self.genesis_env._env.color == "blue":
-            target_pos = self.genesis_env._env.cubeB.get_pos().cpu().numpy()
-        elif self.genesis_env._env.color == "green":
-            target_pos = self.genesis_env._env.cubeC.get_pos().cpu().numpy()
-        else:
-            raise ValueError(f"Unknown color: {self.genesis_env._env.color}")
-        target_pos -= self.genesis_env._env.eef.get_pos().cpu().numpy() # エンドエフェクタからの相対位置に変換
-        # new_obs = target_pos
-        # new_obs = np.concatenate([jooint_pos, target_pos])
-        new_obs = np.concatenate([jooint_pos, joint_vel, target_pos])
+        pos_a = self.genesis_env._env.cubeA.get_pos().cpu().numpy()
+        pos_b = self.genesis_env._env.cubeB.get_pos().cpu().numpy()
+        pos_c = self.genesis_env._env.cubeC.get_pos().cpu().numpy()
+        task_id = self.get_task_info()
+        new_obs = np.concatenate([jooint_pos, joint_vel, pos_a, pos_b, pos_c, np.array([task_id])])
         self.old_pos = jooint_pos.copy()
         return new_obs
 
@@ -179,6 +172,17 @@ class StateObsEnv(BaseCustomEnv):
             if frame is not None:
                 self.frames.append(frame)
         return new_obs, self.reward, terminated, truncated, info
+
+    def get_task_info(self):
+        if 'green' in self.task_desc:
+            return -1.0
+        elif 'red' in self.task_desc:
+            return 0.0
+        elif 'blue' in self.task_desc:
+            return 1.0
+        else:
+            print(f"Unknown task description: {self.task_desc}", file=sys.stderr)
+            return 0.0
 
 class VisualObsEnv(BaseCustomEnv):
     """

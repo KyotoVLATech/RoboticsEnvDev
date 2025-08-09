@@ -1,7 +1,7 @@
 # data
 datasets/
 dataset/
-
+*.safetensors
 # cache
 __pycache__/
 .mypy_cache/

@@ -315,7 +315,7 @@ if __name__ == "__main__":
     # vision_rl: SmolVLAを使わない普通のSimplePickタスク．画像を観測として使用する．
     # state_dsrl: SmolVLAを使ったSimplePickタスク．observationはstate_rlと同じ
     # vision_dsrl: SmolVLAを使ったSimplePickタスク．画像を観測として利用.
-    task = 'vision_dsrl'
+    task = 'state_rl'
     algorithm = 'ppo'
 
     if task == 'vision_rl' or task == 'vision_dsrl':

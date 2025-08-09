@@ -1,6 +1,7 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 import torch
+import numpy as np
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d_masks
 from lerobot.policies.factory import get_policy_class
 
@@ -135,31 +136,43 @@ class SmolVLAWrapper:
 
     def _prepare_batch(self, obs: Dict, task_desc: str) -> Dict[str, torch.Tensor]:
         """観測をSmolVLA用のバッチ形式に変換"""
+        def prepare_image(img: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
+            if isinstance(img, np.ndarray):
+                img = img.copy()  # 負のstride対策
+                tensor_img = torch.from_numpy(img).to(torch.float32)
+            elif isinstance(img, torch.Tensor):
+                tensor_img = img.to(torch.float32)
+            if tensor_img.max() > 1.0:
+                tensor_img /= 255.0
+            if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
+                tensor_img = tensor_img.permute(2, 0, 1)
+            elif tensor_img.ndim == 2:
+                tensor_img = tensor_img.unsqueeze(0)
+            return tensor_img.to(self.device).unsqueeze(0)
+
         observation = {}
         for key in self.smolvla_policy.config.input_features:
             # make_sim_dataset.pyの観測キーに合わせてマッピング
             if key == "observation.state":
-                data = obs["agent_pos"]
-                tensor_data = torch.from_numpy(data).to(torch.float32)
+                if "agent_pos" in obs:
+                    data = obs["agent_pos"]
+                elif "observation.state" in obs:
+                    data = obs["observation.state"]
+                # ndarrayならTensorに変換
+                if isinstance(data, np.ndarray):
+                    tensor_data = torch.from_numpy(data).to(torch.float32)
+                elif isinstance(data, torch.Tensor):
+                    tensor_data = data.to(torch.float32)
                 observation[key] = tensor_data.to(self.device).unsqueeze(0)
             elif key == "observation.images.front":
                 img = obs["observation.images.front"]
-                img = img.copy()  # 負のstride対策
-                tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
-                if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
-                    tensor_img = tensor_img.permute(2, 0, 1)
-                elif tensor_img.ndim == 2:
-                    tensor_img = tensor_img.unsqueeze(0)
-                observation[key] = tensor_img.to(self.device).unsqueeze(0)
+                observation[key] = prepare_image(img)
             elif key == "observation.images.side":
                 img = obs["observation.images.side"]
-                img = img.copy()  # 負のstride対策
-                tensor_img = torch.from_numpy(img).to(torch.float32) / 255.0
-                if tensor_img.ndim == 3 and tensor_img.shape[2] in [1, 3, 4]:
-                    tensor_img = tensor_img.permute(2, 0, 1)
-                elif tensor_img.ndim == 2:
-                    tensor_img = tensor_img.unsqueeze(0)
-                observation[key] = tensor_img.to(self.device).unsqueeze(0)
+                observation[key] = prepare_image(img)
+            elif key == "observation.images.eef":
+                img = obs["observation.images.eef"]
+                observation[key] = prepare_image(img)
             else:
                 print(f"Warning: Unsupported input feature '{key}'. Skipping.")
         observation["task"] = task_desc
