@@ -1,70 +1,69 @@
 import numpy as np
+from PIL import Image
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.genesis_env import GenesisEnv
 from env.tasks.test import joints_name
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-import os
-import numpy as np
-from PIL import Image
 
-task_description = {
-    "test": "Pick up a red cube and place it in a box.",
-}
+saved_cube_pos = None
+is_first_call = True
 
 def expert_policy(env, stage):
+    global saved_cube_pos, is_first_call
     task = env._env
     if task.color == "red":
-        cube_pos = task.cubeA.get_pos().cpu().numpy()
+        cube_pos = task.cubeR.get_pos().cpu().numpy()
     elif task.color == "blue":
         cube_pos = task.cubeB.get_pos().cpu().numpy()
     elif task.color == "green":
-        cube_pos = task.cubeC.get_pos().cpu().numpy()
-    finder_pos = -0.02  # tighter grip
-    quat = np.array([0, 1, 0, 0]) # Changed from [[0, 1, 0, 0]] to [0, 1, 0, 0]
+        cube_pos = task.cubeG.get_pos().cpu().numpy()
+    box_pos = task.box.get_pos().cpu().numpy()
+    grip_close = np.array([0.0])
+    grip_open = np.array([np.pi/3])
+    quat = np.array([1, 0, 0, 0], dtype=np.float32)
+    quat /= np.linalg.norm(quat)
     eef = task.eef
-    if stage == "hover1":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.3])
-        grip = np.array([0.04, 0.04])
-    elif stage == "hover2":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.2])
-        grip = np.array([0.04, 0.04])
+    offset = np.array([-0.02, 0.0, 0.0])
+    # === Stage definitions ===
+    if stage == "hover":
+        is_first_call = True
+        target_pos = cube_pos + np.array([0.0, 0.0, 0.15]) + offset # hover safely
+        grip = grip_open
     elif stage == "stabilize":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.1])
-        grip = np.array([0.04, 0.04])
+        target_pos = cube_pos + np.array([0.0, 0.0, 0.10]) + offset
+        grip = grip_open  # still open
     elif stage == "grasp":
-        target_pos = cube_pos + np.array([0.0, 0.0, 0.1])  # lower slightly
-        grip = np.array([finder_pos, finder_pos])  # close grip
+        target_pos = cube_pos + np.array([0.0, 0.0, 0.07]) + offset  # lower slightly
+        grip = grip_close  # close grip
     elif stage == "lift":
-        target_pos = np.array([cube_pos[0], cube_pos[1], 0.25])
-        grip = np.array([finder_pos, finder_pos])  # keep closed
+        if is_first_call:
+            saved_cube_pos = cube_pos
+            is_first_call = False
+        target_pos = np.array([saved_cube_pos[0], saved_cube_pos[1], 0.15]) + offset
+        grip = grip_close  # keep closed
     elif stage == "to_box":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([finder_pos, finder_pos])
+        target_pos = box_pos + np.array([0.0, 0.0, 0.16]) + offset
+        grip = grip_close
     elif stage == "stabilize_box":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([finder_pos, finder_pos])
+        target_pos = box_pos + np.array([0.0, 0.0, 0.16]) + offset
+        grip = grip_close
     elif stage == "release":
-        box_pos = task.box.get_pos().cpu().numpy()
-        target_pos = box_pos + np.array([0.0, 0.0, 0.25])
-        grip = np.array([0.04, 0.04])
+        target_pos = box_pos + np.array([0.0, 0.0, 0.16]) + offset
+        grip = grip_open
     else:
         raise ValueError(f"Unknown stage: {stage}")
-    # Use IK to compute joint positions for the arm
-    qpos = task.franka.inverse_kinematics(
+    qpos = task.so_arm.inverse_kinematics(
         link=eef,
         pos=target_pos,
         quat=quat,
     ).cpu().numpy()
-    qpos_arm = qpos[:-2]
-    action = np.concatenate([qpos_arm, grip]) # Shape (9)
+    qpos_arm = qpos[:-1]
+    action = np.concatenate([qpos_arm, grip])
     return action.astype(np.float32)
 
 def initialize_dataset(task, height, width):
-    # Initialize dataset
     dict_idx = 0
     dataset_path = f"datasets/{task}_{dict_idx}"
     while os.path.exists(f"datasets/{task}_{dict_idx}"):
@@ -74,14 +73,13 @@ def initialize_dataset(task, height, width):
         repo_id=None,
         fps=30,
         root=dataset_path,
-        robot_type="franka",
+        robot_type="so-101",
         use_videos=True,
         features={
-            "observation.state": {"dtype": "float32", "shape": (9,), "names": joints_name},
-            "action": {"dtype": "float32", "shape": (9,), "names": joints_name},
+            "observation.state": {"dtype": "float32", "shape": (8,), "names": joints_name},
+            "action": {"dtype": "float32", "shape": (6,), "names": joints_name},
             "observation.images.front": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
             "observation.images.side": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
-            "observation.images.eef": {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")},
         },
     )
     return lerobot_dataset
@@ -93,38 +91,24 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
     while ep < episode_num:
         print(f"\n🎬 Starting episode {ep+1}")
         env.reset()
-        states, images_front, images_side, images_eef, actions = [], [], [], [], []
+        states, images_front, images_side, actions = [], [], [], []
         save_flag = False
-        episode_reward = 0.0
         for stage in stage_dict.keys():
             print(f"  Stage: {stage}")
             for t in range(stage_dict[stage]):
                 action = expert_policy(env, stage)
                 obs, reward, _, _, _ = env.step(action)
-                episode_reward += reward
                 states.append(obs["agent_pos"])
                 images_front.append(obs["observation.images.front"])
                 images_side.append(obs["observation.images.side"])
-                images_eef.append(obs["observation.images.eef"])
                 actions.append(action)
-                if reward >= 1.0:
+                if reward > 0:
                     save_flag = True
-        if task == "simple_pick":
-            if episode_reward >= 40.0:
-                print(f"Episode reward: {episode_reward}, success!")
-                save_flag = True
-            else:
-                print(f"Episode reward: {episode_reward}, failed.")
-                save_flag = False
-        # デバッグ用
-        # env.save_video(file_name=f"video", fps=30)
-
         if not save_flag:
-            print(f"🚫 Skipping episode {ep+1}")
+            print(f"🚫 Skipping episode {ep+1} — reward was always 0")
             continue
         print(f"✅ Saving episode {ep+1}")
         ep += 1
-
         for i in range(len(states)):
             image_front = images_front[i]
             if isinstance(image_front, Image.Image):
@@ -132,40 +116,28 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             image_side = images_side[i]
             if isinstance(image_side, Image.Image):
                 image_side = np.array(image_side)
-            image_eef = images_eef[i]
-            if isinstance(image_eef, Image.Image):
-                image_eef = np.array(image_eef)
             dataset.add_frame(
                 {
                     "observation.state": states[i].astype(np.float32),
                     "action": actions[i].astype(np.float32),
                     "observation.images.front": image_front,
                     "observation.images.side": image_side,
-                    "observation.images.eef": image_eef,
-                },
-                task=env.get_task_description(),
+                    "task": env.get_task_description(),
+                }
             )
         dataset.save_episode()
     env.close()
 
 if __name__ == "__main__":
-    task = "simple_pick" # [test, simple_pick]
-    if task == "test":
-        stage_dict = { # 350
-            "hover": 100, # cubeの上に手を持っていく
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-            "to_box": 60, # cubeを箱の上に持っていく
-            "stabilize_box": 20, # cubeを箱の上で安定させる
-            "release": 60, # cubeを離す
-        }
-    elif task == "simple_pick":
-        stage_dict = { # 210
-            "hover1": 100, # cubeの上に手を持っていく
-            "hover2": 30, # cubeの上で手を安定させる
-            "stabilize": 40, # cubeの上で手を安定させる
-            "grasp": 20, # cubeを掴む
-            "lift": 50, # cubeを持ち上げる
-        }
-    main(task, stage_dict=stage_dict, observation_height=512, observation_width=512, episode_num=500, show_viewer=False)
+    # datasetを作成したいタスクを指定
+    task = "test"
+    stage_dict = {
+        "hover": 100, # cubeの上に手を持っていく
+        "stabilize": 50, # cubeの上で手を安定させる
+        "grasp": 100, # cubeを掴む
+        "lift": 100, # cubeを持ち上げる
+        "to_box": 100, # cubeを箱の上に持っていく
+        "stabilize_box": 50, # cubeを箱の上で安定させる
+        "release": 100, # cubeを離す
+    }
+    main(episode_num=1, task=task, stage_dict=stage_dict, observation_height=480, observation_width=640, show_viewer=False)

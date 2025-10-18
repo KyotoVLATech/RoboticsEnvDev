@@ -1,12 +1,9 @@
 import gymnasium as gym
 import warnings
 from env.tasks.test import TestTask
-from env.tasks.simple_pick import SimplePickTask
 
 class GenesisEnv(gym.Env):
-
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
-
     def __init__(
             self,
             task,
@@ -25,7 +22,7 @@ class GenesisEnv(gym.Env):
         self._env = self._make_env_task()
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
-        self._max_episode_steps = 500 if self.task == "test" else 300
+        self._max_episode_steps = 700
         self.step_count = 0
         self.reset_freq = reset_freq
         self.episode_count = 0
@@ -73,10 +70,6 @@ class GenesisEnv(gym.Env):
     def get_obs(self):
         return self._env.get_obs()
 
-    def get_robot(self):
-        #TODO: (jadechovhari) add assertion that a robot exist
-        return self._env.franka
-
     def render(self):
         if "observation.images.front" in self.observation_space.spaces:
             obs = self.get_obs()
@@ -87,22 +80,13 @@ class GenesisEnv(gym.Env):
 
     def get_task_description(self):
         if self.task == "test":
-            return "Pick up a red cube and place it in a box."
-        elif self.task == "simple_pick":
-            return self._env.color
-            # return f"Pick up a {self._env.color} cube."
+            return f"Pick up a {self._env.color} cube and place it in a box."
         else:
             raise NotImplementedError(f"Task {self.task} is not implemented.")
 
     def _make_env_task(self):
         if self.task == "test":
             task = TestTask(
-                observation_height=self.observation_height,
-                observation_width=self.observation_width,
-                show_viewer=self.show_viewer,
-            )
-        elif self.task == "simple_pick":
-            task = SimplePickTask(
                 observation_height=self.observation_height,
                 observation_width=self.observation_width,
                 show_viewer=self.show_viewer,

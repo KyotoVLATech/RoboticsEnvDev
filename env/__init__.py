@@ -9,7 +9,6 @@ class TestEnv(EnvConfig):
     episode_length: int = 500
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
-    
     @property
     def gym_kwargs(self) -> dict:
         return {
