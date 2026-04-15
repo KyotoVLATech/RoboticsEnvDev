@@ -18,3 +18,4 @@ outputs/
 .vscode/
 wandb/
 debug_image.png
+uv.lock
